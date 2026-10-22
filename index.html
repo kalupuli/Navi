@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#11171c">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Einsatznavi">
+  <meta name="format-detection" content="telephone=no, address=no">
+  <title>Einsatznavigation</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@600;700&display=swap">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="style.css?v=2026-10-22.6">
+</head>
+<body>
+  <div id="map" aria-label="Karte"></div>
+
+  <!-- Kopfbereich: Zielsuche -->
+  <header id="searchBar" class="top">
+    <div class="search">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+      <input id="destInput" type="search" inputmode="search" enterkeyhint="go" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+             placeholder="Einsatzziel: Straße Hausnummer Ort" aria-label="Einsatzziel">
+      <button id="clearDest" class="icon-btn" type="button" aria-label="Eingabe leeren" hidden>
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="top-row">
+      <button id="vehicleChip" class="chip" type="button" aria-label="Fahrzeug wählen">
+        <span id="vehicleChipText">PKW</span>
+      </button>
+      <button id="closureChip" class="chip chip-closure" type="button" aria-label="Sperrungen anzeigen">
+        Sperrungen <b id="closureCount">0</b>
+      </button>
+      <span class="spacer"></span>
+      <button id="settingsBtn" class="icon-btn solid" type="button" aria-label="Einstellungen">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>
+      </button>
+    </div>
+    <ul id="suggestions" class="suggestions" role="listbox" hidden></ul>
+  </header>
+
+  <!-- Kopfbereich: Manöveranzeige während der Fahrt -->
+  <header id="navBanner" class="top nav-banner" hidden>
+    <div class="maneuver">
+      <div id="mnvIcon" class="mnv-icon" aria-hidden="true"></div>
+      <div class="mnv-text">
+        <div id="mnvDist" class="mnv-dist">—</div>
+        <div id="mnvInstr" class="mnv-instr">Route wird berechnet</div>
+      </div>
+    </div>
+    <div id="mnvNext" class="mnv-next" hidden></div>
+    <div id="contraWarn" class="contra-warn" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.5"/></svg>
+      <span id="contraWarnText">Einbahnstraße gegen die Fahrtrichtung</span>
+    </div>
+  </header>
+
+  <!-- Sperr-Modus -->
+  <div id="closureBar" class="closure-bar" hidden>
+    <div class="seg" role="radiogroup" aria-label="Sperrungsart">
+      <button type="button" data-ctool="point" class="on" role="radio" aria-checked="true">Punkt</button>
+      <button type="button" data-ctool="area" role="radio" aria-checked="false">Fläche</button>
+    </div>
+    <span id="closureHint" class="closure-hint">Auf die gesperrte Straße tippen</span>
+    <button id="closureUndo" type="button" class="btn ghost small" hidden>Zurück</button>
+    <button id="closureFinish" type="button" class="btn danger small" hidden>Fläche sperren</button>
+    <button id="closureDone" type="button" class="btn small">Fertig</button>
+  </div>
+
+  <!-- Schwebende Tasten -->
+  <div class="fabs">
+    <button id="view3dBtn" class="fab fab-3d" type="button" aria-label="3D-Ansicht des Ziels" aria-pressed="false" hidden>
+      <svg viewBox="0 0 24 24"><path d="M12 2.8l8 4.6v9.2l-8 4.6-8-4.6V7.4z"/><path d="M4 7.4l8 4.6 8-4.6M12 12v9.2"/></svg>
+    </button>
+    <button id="closureModeBtn" class="fab fab-closure" type="button" aria-label="Sperrung einzeichnen">
+      <svg viewBox="0 0 24 24"><rect x="3" y="9" width="18" height="6" rx="1"/><path d="M7 9l-3 6M12 9l-3 6M17 9l-3 6M21 9l-3 6"/><path d="M6 15v5M18 15v5"/></svg>
+    </button>
+    <button id="layerBtn" class="fab" type="button" aria-label="Tag- und Nachtkarte umschalten">
+      <svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
+    </button>
+    <button id="centerBtn" class="fab" type="button" aria-label="Auf Standort zentrieren">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+    </button>
+  </div>
+
+  <!-- Unterer Bereich: Route -->
+  <section id="routeSheet" class="sheet" hidden>
+    <button id="sheetToggle" class="sheet-handle" type="button" aria-expanded="true" aria-controls="routeSheet" aria-label="Details ausblenden"><span></span></button>
+    <div class="route-stats">
+      <div class="stat"><span id="etaClock" class="big">--:--</span><span class="lbl">Ankunft</span></div>
+      <div class="stat"><span id="remTime" class="big">--</span><span class="lbl">Minuten</span></div>
+      <div class="stat"><span id="remDist" class="big">--</span><span class="lbl">km</span></div>
+    </div>
+    <div id="routeBadges" class="badges"></div>
+    <div id="routeChoice" class="route-choice" role="radiogroup" aria-label="Routenwahl" hidden></div>
+    <div class="status-row"><div id="routeStatus" class="route-status" hidden></div><button id="diagBtn" class="link-btn" type="button">Diagnose</button></div>
+    <div class="sheet-actions">
+      <button id="overviewBtn" class="btn ghost" type="button">Übersicht</button>
+      <button id="simBtn" class="btn ghost" type="button">Fahrt simulieren</button>
+      <button id="stopBtn" class="btn danger" type="button">Beenden</button>
+    </div>
+  </section>
+
+  <!-- Fenster: 3D-Ansicht des Ziels -->
+  <section id="view3d" class="view3d small" aria-label="3D-Ansicht des Ziels" hidden>
+    <div class="v3-head">
+      <div class="v3-title"><b>3D Ziel</b><span id="v3Addr"></span></div>
+      <button id="v3Air" class="icon-btn" type="button" aria-pressed="false" aria-label="Luftbild" title="Luftbild">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 16l5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.6"/></svg>
+      </button>
+      <button id="v3Spin" class="icon-btn" type="button" aria-pressed="false" aria-label="Um das Ziel drehen" title="Um das Ziel drehen">
+        <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v4.5h-4.5"/></svg>
+      </button>
+      <button id="v3Center" class="icon-btn" type="button" aria-label="Auf Ziel ausrichten" title="Auf Ziel ausrichten">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+      </button>
+      <button id="v3Size" class="icon-btn" type="button" aria-label="Vergrößern" title="Vergrößern">
+        <svg viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg>
+      </button>
+      <button id="v3Close" class="icon-btn" type="button" aria-label="3D-Ansicht schließen" title="Schließen">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="v3-body">
+      <div id="v3Map" class="v3-map"></div>
+      <div id="v3Msg" class="v3-msg" hidden></div>
+    </div>
+  </section>
+
+  <!-- Statusmeldung GPS -->
+  <div id="gpsState" class="gps-state" data-state="wait">GPS wird gesucht</div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- Panel: Einstellungen -->
+  <div id="settingsPanel" class="panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" hidden>
+    <div class="panel-head">
+      <h2 id="settingsTitle">Grundeinstellungen</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="panel-body">
+
+      <section class="group" id="vehicleGroup">
+        <h3>Fahrzeug</h3>
+        <div class="seg wide" role="radiogroup" aria-label="Fahrzeugart">
+          <button type="button" data-vtype="pkw" role="radio">PKW</button>
+          <button type="button" data-vtype="lkw" role="radio">LKW</button>
+        </div>
+        <div id="truckFields" class="truck">
+          <label class="field-lbl" for="presetSel">Vorlage</label>
+          <select id="presetSel"></select>
+          <div class="dims">
+            <label>Höhe<span class="unit-input"><input id="vHeight" type="number" inputmode="decimal" step="0.05" min="1.5" max="5"><i>m</i></span></label>
+            <label>Breite<span class="unit-input"><input id="vWidth" type="number" inputmode="decimal" step="0.05" min="1.5" max="3.5"><i>m</i></span></label>
+            <label>Länge<span class="unit-input"><input id="vLength" type="number" inputmode="decimal" step="0.1" min="3" max="25"><i>m</i></span></label>
+            <label>Gesamtgewicht<span class="unit-input"><input id="vWeight" type="number" inputmode="decimal" step="0.5" min="2" max="60"><i>t</i></span></label>
+            <label>Achslast<span class="unit-input"><input id="vAxle" type="number" inputmode="decimal" step="0.5" min="1" max="15"><i>t</i></span></label>
+          </div>
+          <p class="hint">Vorlagen sind Richtwerte. Maße des eigenen Fahrzeugs aus dem Fahrzeugschein übernehmen. Beachtet werden Durchfahrtshöhen, Gewichts-, Breiten- und Längenbeschränkungen sowie LKW-Durchfahrtsverbote, soweit diese in OpenStreetMap erfasst sind.</p>
+        </div>
+      </section>
+
+      <section class="group">
+        <h3>Einbahnstraßen</h3>
+        <label class="switch"><input id="optContra" type="checkbox"><span>Gegen die Fahrtrichtung befahren, wenn schneller</span></label>
+        <label class="row-field">Mindestzeitgewinn
+          <span class="unit-input"><input id="optMinGain" type="number" inputmode="numeric" min="0" max="600" step="5"><i>s</i></span>
+        </label>
+        <label class="switch"><input id="optDual" type="checkbox"><span>Auch getrennte Richtungsfahrbahnen (Mittelstreifen, Gegenfahrbahn parallel)</span></label>
+        <p class="field-lbl">Zulässige Straßenklassen</p>
+        <div id="classList" class="checks"></div>
+        <p class="hint">Autobahnen, Kraftfahrstraßen und deren Rampen werden nie gegen die Fahrtrichtung geplant. Getrennte Richtungsfahrbahnen werden daran erkannt, dass parallel eine Gegenfahrbahn gleichen Namens verläuft. Abschnitte gegen die Einbahnrichtung erscheinen auf der Karte gelb. Wird eine Straße verworfen, nennt die Statuszeile Name und Grund.</p>
+      </section>
+
+      <section class="group">
+        <h3>Navigation</h3>
+        <label class="switch"><input id="optVoice" type="checkbox"><span>Sprachansagen</span></label>
+        <label class="switch"><input id="optNight" type="checkbox"><span>Nachtkarte</span></label>
+        <label class="row-field">Radius Punktsperre
+          <span class="unit-input"><input id="optRadius" type="number" inputmode="numeric" min="5" max="200" step="5"><i>m</i></span>
+        </label>
+        <label class="row-field">Kartenstil
+          <select id="optLayer"></select>
+        </label>
+      </section>
+
+      <details class="group">
+        <summary>Server (für Eigenbetrieb)</summary>
+        <label class="field-lbl" for="srvValhalla">Routing (Valhalla)</label>
+        <input id="srvValhalla" type="url" spellcheck="false">
+        <label class="field-lbl" for="srvPhoton">Adresssuche (Photon)</label>
+        <input id="srvPhoton" type="url" spellcheck="false">
+        <label class="field-lbl" for="srvOverpass">Einbahnprüfung (Overpass)</label>
+        <input id="srvOverpass" type="url" spellcheck="false">
+        <button id="srvReset" type="button" class="btn ghost small">Standard wiederherstellen</button>
+      </details>
+      <p id="versionLine" class="hint"></p>
+    </div>
+  </div>
+
+  <!-- Panel: Sperrungen -->
+  <div id="closurePanel" class="panel" role="dialog" aria-modal="true" aria-labelledby="closureTitle" hidden>
+    <div class="panel-head">
+      <h2 id="closureTitle">Sperrungen</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="panel-body">
+      <ul id="closureList" class="closure-list"></ul>
+      <p id="closureEmpty" class="empty">Keine Sperrungen eingetragen. Über die rote Taste rechts auf der Karte lassen sich gesperrte Straßen antippen oder Flächen einzeichnen.</p>
+      <div class="panel-actions">
+        <button id="closureAdd" type="button" class="btn danger">Sperrung einzeichnen</button>
+        <button id="closureExport" type="button" class="btn ghost">Teilen</button>
+        <label class="btn ghost file-btn">Importieren<input id="closureImport" type="file" accept=".json,application/json"></label>
+        <button id="closureClear" type="button" class="btn ghost">Alle aufheben</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Panel: Diagnose -->
+  <div id="diagPanel" class="panel" role="dialog" aria-modal="true" aria-labelledby="diagTitle" hidden>
+    <div class="panel-head">
+      <h2 id="diagTitle">Diagnose</h2>
+      <button class="icon-btn" type="button" data-close aria-label="Schließen"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="panel-body">
+      <p class="hint">Protokoll der letzten Routenberechnung mit allen Zwischenschritten. Die Kartenansicht zeigt die geladenen Einbahnstraßen mit ihrer erlaubten Fahrtrichtung.</p>
+      <div class="panel-actions">
+        <button id="diagCopy" type="button" class="btn">Protokoll kopieren</button>
+        <button id="diagMap" type="button" class="btn ghost">Einbahnstraßen auf Karte zeigen</button>
+      </div>
+      <pre id="diagLog" class="diag-log"></pre>
+    </div>
+  </div>
+
+  <div id="scrim" class="scrim" hidden></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="app.js?v=2026-10-22.6"></script>
+</body>
+</html>
