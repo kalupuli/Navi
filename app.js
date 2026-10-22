@@ -19,7 +19,7 @@ const DEFAULT_SERVERS = {
   photon: 'https://photon.komoot.io',
   overpass: 'https://overpass-api.de/api/interpreter'
 };
-const APP_VERSION = '2026-10-22.12';
+const APP_VERSION = '2026-10-22.13';
 const OVERPASS_MIRRORS = ['https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 
 /* Diagnoseprotokoll der letzten Routenberechnung */
@@ -949,9 +949,9 @@ function edgeClass(e) {
    als eigenen Eintrag mit Richtung (heading) und PKW-Freigabe (edge.access.car). Ist in unserer
    Fahrtrichtung keine Spur freigegeben, wohl aber in der Gegenrichtung, wird der Abschnitt
    entgegen der Einbahnrichtung befahren. */
-async function classifyDirection(route, cand, log = dlog) {
-  for (let i = 0; i < cand.length && i < 150; i += 50) {
-    const chunk = cand.slice(i, Math.min(i + 50, 150));
+async function classifyDirection(route, cand, log = dlog, max = 150) {
+  for (let i = 0; i < cand.length && i < max; i += 50) {
+    const chunk = cand.slice(i, Math.min(i + 50, max));
     const locs = chunk.map(it => {
       const k = Math.max(0, Math.min(route.shape.length - 2, Math.floor((it.b + it.en - 1) / 2)));
       it.brg = planarBearing(route.xy[k], route.xy[k + 1]);
@@ -987,12 +987,12 @@ async function classifyDirection(route, cand, log = dlog) {
   }
 }
 
-function legalRanges(items) {
+function legalRanges(items, flag = 'legal') {
   const out = [];
   let cur = null;
   for (const it of items) {
     const e = it.e;
-    if (!it.legal) { if ((e.length || 0) > 0.002) cur = null; continue; }
+    if (!it[flag]) { if ((e.length || 0) > 0.002) cur = null; continue; }
     if (!cur) { cur = { i0: it.b, i1: it.en - 1, len: 0, names: [] }; out.push(cur); }
     cur.i1 = Math.max(cur.i1, it.en - 1);
     cur.len += (e.length || 0) * 1000;
@@ -1002,15 +1002,104 @@ function legalRanges(items) {
   return out;
 }
 
-/* Einbahnstraßen auf einer Route kennzeichnen (regelgerecht grün, entgegen gelb), auch auf der regulären Route */
+/* Abschnitte, die nie als Einbahnstraße gekennzeichnet werden: Autobahn, Kraftfahrstraße,
+   Auf- und Abfahrten, Abbiegespuren und Kreisverkehre sind zwar richtungsgebunden, aber keine Einbahnstraßen. */
+function onewayExempt(e) {
+  const cls = edgeClass(e);
+  return cls === 'motorway' || cls === 'trunk' || !!e.roundabout || e.use === 'ramp' || e.use === 'turn_channel';
+}
+
+/* Getrennte Richtungsfahrbahn: In 8 bis 35 m Abstand verläuft eine Fahrbahn gleichen Namens,
+   welche für PKW in der Gegenrichtung freigegeben ist. Solche Abschnitte sind keine Einbahnstraßen. */
+async function findDualGroups(route, groups, log = dlog) {
+  const pts = [], owner = [];
+  for (const g of groups.slice(0, 40)) {
+    const it = g.rep, k = Math.max(0, Math.min(route.shape.length - 2, Math.floor((it.b + it.en - 1) / 2)));
+    const a = route.xy[k], b = route.xy[k + 1];
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    const nx = -(b[1] - a[1]) / L, ny = (b[0] - a[0]) / L;
+    const m = lerp(route.shape[k], route.shape[k + 1], .5);
+    g.brg = planarBearing(a, b);
+    for (const off of [-24, -12, 12, 24]) {
+      pts.push({ lat: +(m[0] + ny * off / 111320).toFixed(6), lon: +(m[1] + nx * off / (111320 * Math.cos(toRad(m[0])))).toFixed(6), radius: 10 });
+      owner.push(g);
+    }
+  }
+  for (let i = 0; i < pts.length; i += 60) {
+    let data;
+    try {
+      const r = await postJson(vEndpoint('locate'), { locations: pts.slice(i, i + 60), costing: 'auto', verbose: true }, 10000);
+      if (!r.res.ok || !Array.isArray(r.data)) throw new Error(r.data && r.data.error ? r.data.error : 'HTTP ' + r.res.status);
+      data = r.data;
+    } catch (e) { log(`  Prüfung Richtungsfahrbahn fehlgeschlagen: ${e.message}`); continue; }
+    data.forEach((loc, j) => {
+      const g = owner[i + j];
+      for (const x of (loc && loc.edges) || []) {
+        const way = x.edge_info && x.edge_info.way_id;
+        const names = (x.edge_info && x.edge_info.names) || [];
+        const car = x.edge && x.edge.access && x.edge.access.car;
+        if (!car || x.heading == null || g.ways.has(way)) continue;
+        if (angDiff(x.heading, g.brg) < 145) continue;
+        const same = g.names.size ? names.some(n => g.names.has(n)) : !names.length;
+        if (same) g.dual = names[0] || 'Parallelfahrbahn';
+      }
+    });
+  }
+}
+
+/* Einbahnstraßen auf einer Route kennzeichnen (regelgerecht grün). Geprüft wird jeder Weg der Route
+   über locate, unabhängig von traversability, da diese bei Einbahnstraßen mit freigegebenem
+   Radverkehr in Gegenrichtung "both" lautet. Gleiche Wege werden zusammengefasst und einmal geprüft. */
 async function annotateOneways(route) {
   if (!route || route.onewayChecked || !route.rawShape) return;
   route.onewayChecked = true;
+  const tag = route === nav.route ? 'Route' : 'Alternative';
   try {
-    const an = await analyzeEdges(route, { quiet: true, secondPass: false });
-    route.oneways = an.oneways;
-    if (route.contraAllowed && !route.contra.length && an.ranges.length) route.contra = an.ranges;
-  } catch { route.oneways = []; return; }
+    const attr = await edgeAttributes(route, dlog);
+    const map = indexMapper(route, attr.shape);
+    const last = route.shape.length - 1;
+    const items = attr.edges.map(e => {
+      const b = Math.min(map(e.begin_shape_index ?? 0), last - 1);
+      const en = Math.min(last, Math.max(b + 1, map(e.end_shape_index ?? 0)));
+      return { e, b, en, contra: false, legal: false, ow: false, cw: false };
+    });
+    /* Aufeinanderfolgende Abschnitte desselben Wegs zusammenfassen */
+    const groups = [];
+    for (const it of items) {
+      const key = it.e.way_id || (it.e.names && it.e.names[0]) || null;
+      const g = groups[groups.length - 1];
+      if (g && key && g.key === key) g.items.push(it);
+      else groups.push({ key, items: [it] });
+    }
+    const check = [];
+    groups.forEach((g, gi) => {
+      g.len = g.items.reduce((s, it) => s + (it.e.length || 0) * 1000, 0);
+      g.rep = g.items.reduce((a, b) => ((b.e.length || 0) > (a.e.length || 0) ? b : a));
+      g.names = new Set(g.items.flatMap(it => it.e.names || []));
+      g.ways = new Set(g.items.map(it => it.e.way_id).filter(Boolean));
+      if (onewayExempt(g.rep.e)) return;
+      if (g.len < 3 && gi !== groups.length - 1) return;
+      check.push(g);
+    });
+    await classifyDirection(route, check.map(g => g.rep), () => {}, 300);
+    const legal = check.filter(g => g.rep.legal);
+    if (legal.length) await findDualGroups(route, legal);
+    const dual = legal.filter(g => g.dual);
+    for (const g of legal) if (!g.dual) for (const it of g.items) it.ow = true;
+    route.oneways = legalRanges(items, 'ow');
+    /* Kandidat mit aufgehobener Einbahnbeschränkung ohne eigene Prüfung: Gegenrichtung ebenfalls kennzeichnen */
+    if (route.contraAllowed && !route.contra.length) {
+      for (const g of check) if (g.rep.contra) for (const it of g.items) it.cw = true;
+      route.contra = legalRanges(items, 'cw').map(r => ({ ...r, classes: [], wayIds: [], dual: false }));
+      route.contraLen = route.contra.reduce((sum, r) => sum + r.len, 0);
+    }
+    const nm = g => [...g.names][0] || 'unbenannt';
+    dlog(`Einbahnkennzeichnung ${tag}: ${groups.length} Wege, ${check.length} geprüft, regelgerecht ${legal.length - dual.length}` +
+      (legal.length - dual.length ? ` (${legal.filter(g => !g.dual).map(nm).join(', ')})` : '') +
+      (dual.length ? `, getrennte Richtungsfahrbahn ausgenommen: ${dual.map(nm).join(', ')}` : ''));
+    const end = check[check.length - 1];
+    if (end && end === groups[groups.length - 1]) dlog(`  Zielabschnitt ${nm(end)}: ${end.rep.detail || 'ohne Ergebnis'}${end.dual ? ', Richtungsfahrbahn' : ''}`);
+  } catch (e) { route.oneways = []; dlog(`Einbahnkennzeichnung ${tag} fehlgeschlagen: ${e.message}`); return; }
   const o = nav.options || {};
   if (route === nav.route || Object.values(o).includes(route)) { drawRoute(); renderBadges(); }
 }
@@ -1732,7 +1821,8 @@ function localTrip(G, path) {
   const oneways = [];
   let oc = null;
   path.edges.forEach((e, k) => {
-    if (e.way.dir && !e.contra) {
+    const hw = e.way.tags.highway || '';
+    if (e.way.dir && !e.contra && !e.way.dual && !/^(motorway|trunk)/.test(hw) && e.way.tags.junction !== 'roundabout') {
       if (!oc) { oc = { i0: k, i1: k, len: 0, names: [] }; oneways.push(oc); }
       oc.i1 = k; oc.len += e.len;
       if (nameOf(e) && !oc.names.includes(nameOf(e))) oc.names.push(nameOf(e));
@@ -1855,8 +1945,6 @@ async function computeRoute(reason = 'new') {
   if (token !== routeToken) return;
   if (vc.best) {
     vc.best.route.contra = vc.best.ranges;
-    vc.best.route.oneways = vc.best.oneways || [];
-    vc.best.route.onewayChecked = true;
     vc.best.route.contraLen = vc.best.ranges.reduce((sum, r) => sum + r.len, 0);
     finishContra(vc.best.route, vc.best.gain, hasNormal, reason, 'Routingserver');
     return;
