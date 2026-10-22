@@ -580,3 +580,33 @@ input[type="text"] {
   overflow-y: auto; -webkit-overflow-scrolling: touch;
 }
 body.landscape .sheet { max-height: none; }
+
+/* ---------- Fenster (Einstellungen, Sperrungen, Diagnose) auf aktuellen iPhones ----------
+   Höhe nach dem tatsächlich sichtbaren Bereich (dvh), Statusleiste und Dynamic Island bleiben frei,
+   Kopfzeile mit Schließen bleibt stehen, unten zusätzlich „Fertig“. */
+.panel {
+  max-height: calc(100vh - env(safe-area-inset-top, 0px) - 24px);
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 24px);
+  overflow: hidden;
+}
+.panel-head { flex: none; position: relative; z-index: 1; background: var(--panel); border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.panel-head .icon-btn { width: 48px; height: 48px; border-radius: 12px; background: var(--panel-2); }
+.panel-head .icon-btn svg { width: 24px; height: 24px; }
+.panel-body { flex: 1 1 auto; min-height: 0; padding-bottom: 16px; }
+.panel-foot {
+  flex: none; display: flex; border-top: 1px solid var(--line); background: var(--panel);
+  padding: 10px max(16px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 10px) max(16px, env(safe-area-inset-left, 0px));
+}
+.panel-foot .btn { flex: 1; min-height: 50px; font-size: 17px; }
+body.landscape .panel { max-height: none; }
+body.landscape .panel-head { padding-top: max(14px, env(safe-area-inset-top, 0px)); }
+
+/* Obere Zeile: Knöpfe dürfen schrumpfen, Einstellungstaste bleibt immer sichtbar */
+.top-row { min-width: 0; }
+.top-row .chip { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.top-row .chip > span { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.top-row #settingsBtn { flex: none; }
+.top-row .spacer { flex: 1 1 0; min-width: 0; }
+.top { grid-template-columns: minmax(0, 1fr); }
+#destInput { width: 100%; min-width: 0; }
+.search { min-width: 0; }
