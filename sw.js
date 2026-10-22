@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const VERSION = '2026-10-22.9';
+const VERSION = '2026-10-22.10';
 const APP_CACHE = 'app-' + VERSION;
 const LIB_CACHE = 'lib-v1';
 const TILE_CACHE = 'tiles-v1';

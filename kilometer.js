@@ -89,7 +89,7 @@ async function placeName(lat, lon) {
 async function babLookup(road, km) {
   const lo = Math.floor(km), hi = Math.ceil(km);
   const feats = await arcQuery(KM_BAB_URL, {
-    where: `Bez='${road}' AND ((Kilometer>=${lo - 1} AND Kilometer<=${hi + 1}) OR Kilometer=${Math.round(km - 20)} OR Kilometer=${Math.round(km + 20)})`,
+    where: `Bez='${road}' AND ((Kilometer>=${lo - 3} AND Kilometer<=${hi + 3}) OR Kilometer=${Math.round(km - 20)} OR Kilometer=${Math.round(km + 20)})`,
     outFields: 'Kilometer', outSR: 4326, returnGeometry: true, resultRecordCount: 200
   });
   const pts = feats.filter(f => f.geometry).map(f => ({ km: +f.attributes.Kilometer, ll: [f.geometry.y, f.geometry.x] }));
@@ -117,13 +117,20 @@ async function babLookup(road, km) {
     const [nUp, nDown, here] = await Promise.all([
       ahead ? placeName(...ahead.ll) : null, back ? placeName(...back.ll) : null, placeName(...c.ll)
     ]);
-    const base = { lat: c.ll[0], lon: c.ll[1], label: `${road} km ${fmtKm(km)}`, kmInfo: { kind: 'bab', road, km, here } };
+    /* Achse: Kilometerpunkte desselben Abschnitts im Umkreis von 4 km, nach km sortiert */
+    const axis = [];
+    for (const p of pts.filter(p => Math.abs(p.km - km) <= 3.5 && haversine(p.ll, c.ll) < 4000).sort((x, y) => x.km - y.km)) {
+      const prev = axis[axis.length - 1];
+      if (prev && prev.km === p.km) { if (haversine(p.ll, c.ll) < haversine(prev.ll, c.ll)) axis[axis.length - 1] = p; }
+      else axis.push(p);
+    }
+    const base = { lat: c.ll[0], lon: c.ll[1], label: `${road} km ${fmtKm(km)}`, kmInfo: { kind: 'bab', road, km, here, axis } };
     const filter = { search_filter: { min_road_class: 'motorway', max_road_class: 'motorway' } };
     if (c.brg == null) { items.push({ ...base, sub: here ? `bei ${here}` : 'Fahrtrichtung unbestimmt', loc: filter }); continue; }
     items.push({ ...base, sub: `Fahrtrichtung ${nUp || 'steigende km'}${here ? `, bei ${here}` : ''}`,
-      loc: { ...filter, heading: Math.round(c.brg), heading_tolerance: 45 }, kmInfo: { ...base.kmInfo, dir: nUp || 'steigende km' } });
+      loc: { ...filter, heading: Math.round(c.brg), heading_tolerance: 45 }, kmInfo: { ...base.kmInfo, dir: nUp || 'steigende km', inc: true } });
     items.push({ ...base, sub: `Fahrtrichtung ${nDown || 'fallende km'}${here ? `, bei ${here}` : ''}`,
-      loc: { ...filter, heading: Math.round((c.brg + 180) % 360), heading_tolerance: 45 }, kmInfo: { ...base.kmInfo, dir: nDown || 'fallende km' } });
+      loc: { ...filter, heading: Math.round((c.brg + 180) % 360), heading_tolerance: 45 }, kmInfo: { ...base.kmInfo, dir: nDown || 'fallende km', inc: false } });
   }
   return items;
 }
@@ -324,19 +331,29 @@ function llAt(tr, s) {
   return lerp(tr.pts[i].ll, tr.pts[i + 1].ll, L ? Math.max(0, Math.min(1, (s - tr.cum[i]) / L)) : 0);
 }
 
-async function wallsAround(tr, here, ll) {
+/* Lärmschutzwände Bahn: EBA-Datensatz (NPGeo-Kat) */
+async function ebaWalls(ll) {
   const feats = await arcQuery(LSW_URL, { ...envQuery(ll, 1500), outFields: 'hoehe_ok', returnGeometry: true, resultRecordCount: 2000 });
+  return feats.map(f => ({ path: pathOf(f), h: +f.attributes.hoehe_ok || null })).filter(w => w.path.length > 1);
+}
+
+/* Lärmschutzwände Straße: OpenStreetMap (wall=noise_barrier), kleiner Ausschnitt über Overpass */
+async function osmWalls(ll) {
+  const dLat = 1500 / 111320, dLon = 1500 / (111320 * Math.cos(toRad(ll[0])));
+  const bb = [ll[0] - dLat, ll[1] - dLon, ll[0] + dLat, ll[1] + dLon].map(v => v.toFixed(5)).join(',');
+  const data = await overpass(`[out:json][timeout:15];(way["wall"="noise_barrier"](${bb});way["barrier"="noise_barrier"](${bb}););out geom tags;`);
+  return (data.elements || []).filter(e => e.type === 'way' && e.geometry && e.geometry.length > 1)
+    .map(e => ({ path: e.geometry.map(g => [g.lat, g.lon]), h: parseFloat(String((e.tags || {}).height || '').replace(',', '.')) || null }));
+}
+
+/* Ordnet Wände den Seiten der Achse zu und sucht die nächsten Lücken (Wandenden) */
+function matchWalls(tr, here, walls, dmin, dmax) {
   const sides = { L: [], R: [] };
-  const drawn = [];
-  for (const f of feats) {
-    const path = pathOf(f);
-    if (path.length < 2) continue;
-    const proj2 = path.map(p => onTrack(tr, p)).filter(o => o && o.dist <= 35 && o.dist >= 1.5);
-    if (proj2.length < 2) continue;
-    const side = proj2.reduce((s, o) => s + Math.sign(o.d), 0) >= 0 ? 'L' : 'R';
-    const s0 = Math.min(...proj2.map(o => o.s)), s1 = Math.max(...proj2.map(o => o.s));
-    sides[side].push({ s0, s1, h: +f.attributes.hoehe_ok || null });
-    drawn.push(path);
+  for (const w of walls) {
+    const pr = w.path.map(p => onTrack(tr, p)).filter(o => o && o.dist <= dmax && o.dist >= dmin);
+    if (pr.length < 2) continue;
+    const side = pr.reduce((s, o) => s + Math.sign(o.d), 0) >= 0 ? 'L' : 'R';
+    sides[side].push({ s0: Math.min(...pr.map(o => o.s)), s1: Math.max(...pr.map(o => o.s)), h: w.h });
   }
   const merge = list => {
     list.sort((a, b) => a.s0 - b.s0);
@@ -354,18 +371,45 @@ async function wallsAround(tr, here, ll) {
     const list = merge(sides[side]);
     const cover = list.find(w => w.s0 <= here.s && w.s1 >= here.s);
     if (cover) {
-      const back = here.s - cover.s0, fwd = cover.s1 - here.s;
       res[side] = {
         wall: true, h: cover.h,
-        fwd: { dist: fwd, km: kmAt(tr, cover.s1), ll: llAt(tr, cover.s1), open: cover.s1 < sMax - 5 },
-        back: { dist: back, km: kmAt(tr, cover.s0), ll: llAt(tr, cover.s0), open: cover.s0 > 5 }
+        fwd: { dist: cover.s1 - here.s, km: kmAt(tr, cover.s1), ll: llAt(tr, cover.s1), open: cover.s1 < sMax - 5 },
+        back: { dist: here.s - cover.s0, km: kmAt(tr, cover.s0), ll: llAt(tr, cover.s0), open: cover.s0 > 5 }
       };
     } else {
       const ahead = list.find(w => w.s0 > here.s), behind = [...list].reverse().find(w => w.s1 < here.s);
       res[side] = { wall: false, ahead: ahead ? { dist: ahead.s0 - here.s, km: kmAt(tr, ahead.s0) } : null, behind: behind ? { dist: here.s - behind.s1, km: kmAt(tr, behind.s1) } : null };
     }
   }
-  return { res, drawn, count: feats.length };
+  return res;
+}
+
+/* Achse aus Stützpunkten mit km (aufsteigend) */
+function axisTrack(pts) {
+  if (!pts || pts.length < 2) return null;
+  const lat0 = pts[0].ll[0];
+  const xy = pts.map(p => proj(p.ll, lat0));
+  const cum = [0];
+  for (let i = 1; i < xy.length; i++) cum.push(cum[i - 1] + Math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]));
+  return { pts, xy, cum, lat0 };
+}
+
+/* Alle Wände zeichnen, Lücken der zugeordneten Wände beschriften */
+function drawWalls(walls, res) {
+  for (const w of walls) {
+    L.polyline(w.path, { pane: 'rail', color: '#ffffff', weight: 8, opacity: .8, interactive: false }).addTo(wallLayer);
+    L.polyline(w.path, { pane: 'rail', color: '#374151', weight: 5, opacity: 1 })
+      .bindTooltip(`Lärmschutzwand${w.h ? `, ${nf1.format(w.h)} m` : ''}`).addTo(wallLayer);
+  }
+  if (!res) return;
+  for (const side of ['L', 'R']) {
+    const r = res[side];
+    if (!r || !r.wall) continue;
+    for (const g of [r.fwd, r.back]) if (g.open) {
+      L.marker(g.ll, { keyboard: false, interactive: false, zIndexOffset: 700,
+        icon: L.divIcon({ className: '', iconSize: [0, 0], iconAnchor: [0, 0], html: `<div class="gap-label">Lücke km ${esc(fmtKm(Math.round(g.km * 1000) / 1000))}</div>` }) }).addTo(wallLayer);
+    }
+  }
 }
 
 async function neighborsAround(nr, info, tr, here, ll) {
@@ -406,6 +450,39 @@ async function neighborsAround(nr, info, tr, here, ll) {
   return { lage, text, total, list };
 }
 
+let babCtxToken = 0;
+async function loadBabContext() {
+  const d = dest, info = d && d.kmInfo;
+  if (!info || info.kind !== 'bab') return;
+  const token = ++babCtxToken;
+  info.ctx = { loading: true };
+  renderDestInfo();
+  const ll = [d.lat, d.lon];
+  const ctx = { loading: false };
+  try {
+    const walls = await osmWalls(ll);
+    if (token !== babCtxToken || dest !== d) return;
+    const tr = axisTrack(info.axis);
+    let res = null;
+    if (tr) {
+      const here = onTrack(tr, ll);
+      res = matchWalls(tr, here, walls, 5, 70);
+      /* Seiten und Richtungen auf die gewählte Fahrtrichtung beziehen */
+      if (info.inc === false) res = { L: flipSide(res.R), R: flipSide(res.L) };
+    }
+    ctx.walls = { res, count: walls.length };
+    drawWalls(walls, res);
+  } catch (e) { ctx.walls = { error: e.message }; }
+  if (token !== babCtxToken || dest !== d) return;
+  info.ctx = ctx;
+  renderDestInfo();
+}
+function flipSide(r) {
+  if (!r) return r;
+  if (r.wall) return { ...r, fwd: r.back, back: r.fwd };
+  return { ...r, ahead: r.behind, behind: r.ahead };
+}
+
 let railCtxToken = 0;
 async function loadRailContext() {
   const d = dest, info = d && d.kmInfo;
@@ -420,27 +497,14 @@ async function loadRailContext() {
     const tr = await trackAround(info.nr, info.km, 1.6);
     if (!tr) throw new Error('Gleisachse nicht verfügbar');
     const here = onTrack(tr, ll);
-    const [w, n] = await Promise.all([
-      wallsAround(tr, here, ll).catch(e => ({ error: e.message })),
+    const [walls, n] = await Promise.all([
+      ebaWalls(ll).catch(e => ({ error: e.message })),
       neighborsAround(info.nr, info, tr, here, ll).catch(e => ({ error: e.message }))
     ]);
+    const w = walls.error ? walls : { res: matchWalls(tr, here, walls, 1.5, 35) };
     ctx.walls = w; ctx.nb = n;
     if (token !== railCtxToken || dest !== d) return;
-    /* Karte: Wände dunkelgrau, Lücken grün */
-    if (w && w.drawn) {
-      for (const p of w.drawn) {
-        L.polyline(p, { pane: 'rail', color: '#ffffff', weight: 8, opacity: .8, interactive: false }).addTo(wallLayer);
-        L.polyline(p, { pane: 'rail', color: '#374151', weight: 5, opacity: 1, interactive: false }).addTo(wallLayer);
-      }
-      for (const side of ['L', 'R']) {
-        const r = w.res[side];
-        if (!r || !r.wall) continue;
-        for (const g of [r.fwd, r.back]) if (g.open) {
-          L.marker(g.ll, { keyboard: false, interactive: false, zIndexOffset: 700,
-            icon: L.divIcon({ className: '', iconSize: [0, 0], iconAnchor: [0, 0], html: `<div class="gap-label">Lücke km ${esc(fmtKm(Math.round(g.km * 1000) / 1000))}</div>` }) }).addTo(wallLayer);
-        }
-      }
-    }
+    if (!walls.error) drawWalls(walls, w.res);
   } catch (e) { ctx.error = e.message; }
   if (token !== railCtxToken || dest !== d) return;
   info.ctx = ctx;
@@ -452,16 +516,17 @@ async function loadRailContext() {
 let destInfoHidden = load('destInfoHidden', false);
 function setDestInfoHidden(on) { destInfoHidden = on; save('destInfoHidden', on); renderDestInfo(); }
 
-function wallText(r, side) {
+function wallText(r, side, road) {
   const name = side === 'L' ? 'Links' : 'Rechts';
+  const up = road ? 'voraus' : 'steigende km', down = road ? 'zurück' : 'fallende km';
   if (!r) return `${name}: keine Angabe`;
   if (!r.wall) {
     const near = [r.ahead && r.ahead.dist < 300 ? `nächste Wand in ${fmtDist(r.ahead.dist)} (km ${fmtKm(Math.round(r.ahead.km * 1000) / 1000)})` : '',
-      r.behind && r.behind.dist < 300 ? `Wandende ${fmtDist(r.behind.dist)} zurück` : ''].filter(Boolean).join(', ');
+      r.behind && r.behind.dist < 300 ? `Wandende ${fmtDist(r.behind.dist)} ${road ? 'zurück' : 'in Richtung fallender km'}` : ''].filter(Boolean).join(', ');
     return `${name}: keine Lärmschutzwand${near ? `, ${near}` : ''}`;
   }
   const gap = g => g.open ? `${fmtDist(g.dist)} bis km ${fmtKm(Math.round(g.km * 1000) / 1000)}` : `über ${fmtDist(g.dist)}`;
-  return `${name}: Lärmschutzwand${r.h ? ` ${nf1.format(r.h)} m über SO` : ''}. Nächste Lücke ${gap(r.fwd)} (steigende km) oder ${gap(r.back)} (fallende km)`;
+  return `${name}: Lärmschutzwand${r.h ? ` ${nf1.format(r.h)} m${road ? ' hoch' : ' über SO'}` : ''}. Nächste Lücke ${gap(r.fwd)} (${up}) oder ${gap(r.back)} (${down})`;
 }
 
 function renderDestInfo() {
@@ -475,8 +540,19 @@ function renderDestInfo() {
   if (destInfoHidden) { box.hidden = true; return; }
   const close = '<button type="button" class="di-close" aria-label="Zielhinweise ausblenden" title="Ausblenden"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>';
   if (k.kind === 'bab') {
+    const c = k.ctx || {}, w = c.walls || {};
+    let rows = '', more = '';
+    if (c.loading) rows = '<div class="di-row muted">Prüfe Lärmschutzwände</div>';
+    else if (w.error) rows = `<div class="di-row muted">Lärmschutzwände nicht abrufbar (OpenStreetMap-Dienst): ${esc(w.error)}</div>`;
+    else if (w.res) {
+      const any = w.res.L.wall || w.res.R.wall;
+      rows = `<div class="di-row"><b>Lärmschutzwand:</b> ${any ? `${[w.res.R.wall ? 'rechts' : '', w.res.L.wall ? 'links' : ''].filter(Boolean).join(' und ')} in Fahrtrichtung` : 'keine an dieser Stelle'}</div>`;
+      more = `<div class="di-row">${esc(wallText(w.res.R, 'R', true))}.</div><div class="di-row">${esc(wallText(w.res.L, 'L', true))}.</div>`;
+    } else if (w.count != null) rows = `<div class="di-row muted">${w.count} Lärmschutzwände im Umkreis auf der Karte, Achse zur Zuordnung nicht verfügbar</div>`;
     box.innerHTML = `<div class="di-top"><div class="di-head">${esc(k.road)} km ${esc(fmtKm(k.km))}</div>${close}</div>
-      <div class="di-sub">${k.dir ? `Fahrtrichtung ${esc(k.dir)}` : 'Fahrtrichtung offen'}${k.here ? ` · bei ${esc(k.here)}` : ''}</div>`;
+      <div class="di-sub">${k.dir ? `Fahrtrichtung ${esc(k.dir)}` : 'Fahrtrichtung offen'}${k.here ? ` · bei ${esc(k.here)}` : ''}</div>
+      ${rows}<div class="di-more">${more}</div>
+      ${c.loading || w.error ? '' : '<div class="di-src">Seiten in Fahrtrichtung. Lärmschutzwände aus OpenStreetMap, Vollständigkeit nicht gesichert. Lücken = Wandenden.</div>'}`;
   } else {
     const [lvl, txt] = ELEK_TEXT[k.elek] || ['warn', `Elektrifizierung: ${k.elek}. Vor Ort prüfen.`];
     const c = k.ctx || {};
@@ -523,5 +599,6 @@ function onDestChosen() {
   renderDestInfo();
   announceDestInfo();
   loadRailContext();
+  loadBabContext();
 }
 $('destInfoChip').addEventListener('click', () => setDestInfoHidden(false));
