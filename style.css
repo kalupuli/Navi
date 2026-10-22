@@ -488,3 +488,27 @@ body.fabs-row .view3d.small {
   top: calc(var(--banner-b, 110px) + 70px); bottom: calc(var(--sheet-h, 220px) + 12px);
   height: auto; max-height: none; min-height: 0;
 }
+
+/* ---------- Bedienung der 3D-Ansicht ---------- */
+.v3-body .v3-map .maplibregl-canvas-container, .v3-body .v3-map canvas { touch-action: none; }
+.v3-pad {
+  position: absolute; left: 8px; bottom: 8px; z-index: 2; display: flex; gap: 6px;
+}
+.v3-pad button {
+  width: 42px; height: 42px; display: grid; place-items: center; padding: 0;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .25); font: 700 15px/1 var(--font-ui);
+}
+.v3-pad button svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.v3-pad button:active { background: var(--route); color: var(--route-ink); }
+.view3d.big .v3-pad { left: max(12px, env(safe-area-inset-left, 0px)); bottom: 14px; gap: 10px; }
+.view3d.big .v3-pad button { width: 54px; height: 54px; border-radius: 14px; font-size: 17px; }
+.view3d.big .v3-pad button svg { width: 26px; height: 26px; }
+.v3-hint {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 2; pointer-events: none;
+  padding: 8px 12px; border-radius: 10px; text-align: center; font-weight: 600; font-size: 13px; line-height: 1.35;
+  background: rgba(10, 15, 20, .78); color: #fff; white-space: nowrap;
+}
+@media (max-height: 760px) { .view3d.small .v3-pad button { width: 38px; height: 38px; } }
+.v3-head .txt-btn { font: 700 13px/1 var(--font-ui); letter-spacing: -.02em; }
+.view3d .maplibregl-ctrl-top-right { margin-top: 2px; }

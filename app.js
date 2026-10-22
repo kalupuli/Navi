@@ -19,7 +19,7 @@ const DEFAULT_SERVERS = {
   photon: 'https://photon.komoot.io',
   overpass: 'https://overpass-api.de/api/interpreter'
 };
-const APP_VERSION = '2026-10-22.6';
+const APP_VERSION = '2026-10-22.7';
 const OVERPASS_MIRRORS = ['https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 
 /* Diagnoseprotokoll der letzten Routenberechnung */
@@ -2016,7 +2016,6 @@ async function startNav() {
   try {
     if ('wakeLock' in navigator) nav.wake = await navigator.wakeLock.request('screen');
   } catch { /* nicht verfügbar */ }
-  if (!nav.wake) onceHint('wake', 'Display bleibt auf diesem Gerät nicht automatisch an. Unter Einstellungen › Anzeige & Helligkeit › Automatische Sperre auf „Nie“ stellen.');
 }
 
 function stopNav() {
@@ -2526,30 +2525,96 @@ async function open3d() {
   try {
     v3.map = new maplibregl.Map({
       container: v3el.map, style: STYLE_3D,
-      center: [dest.lon, dest.lat], zoom: 17.4, pitch: 62, bearing: approachBearing(), maxPitch: 80,
-      attributionControl: { compact: true }
+      center: [dest.lon, dest.lat], zoom: 17.4, pitch: 62, bearing: approachBearing(),
+      minZoom: 14, maxZoom: 19.8, maxPitch: 80,
+      attributionControl: false, dragRotate: false, dragPan: false, touchPitch: false,
+      doubleClickZoom: false, keyboard: false, boxZoom: false, pitchWithRotate: false
     });
   } catch (e) {
     v3.map = null;
     v3msg('3D-Darstellung wird von diesem Gerät nicht unterstützt (WebGL).');
     return;
   }
-  v3.map.addControl(new maplibregl.NavigationControl({ visualizePitch: true, showZoom: false }), 'bottom-right');
+  v3.map.addControl(new maplibregl.AttributionControl({ compact: true }), 'top-right');
+  setup3dGestures();
   v3.map.on('load', () => {
     v3.ready = true;
     v3msg('');
+
     try { setup3dLayers(); } catch (e) { console.warn('3D-Ebenen', e); }
     focus3d(false);
+    /* Quellenangabe nach dem Laden aller Quellen einklappen (Tipp auf „i“ zeigt sie wieder) */
+    v3.map.once('idle', collapseAttrib);
   });
   v3.map.on('idle', highlightTarget);
   v3.map.on('error', e => {
     if (!v3.ready) v3msg('Kartendaten für die 3D-Ansicht nicht erreichbar.');
     console.warn('3D', e && e.error ? e.error.message : e);
   });
-  for (const ev of ['dragstart', 'rotatestart', 'pitchstart', 'zoomstart']) {
-    v3.map.on(ev, e => { if (e.originalEvent && v3.spin) setSpin(false); });
-  }
+  v3.map.on('zoomstart', e => { if (e.originalEvent && v3.spin) setSpin(false); });
 }
+
+/* Bedienung der 3D-Ansicht: Das Ziel bleibt in der Bildmitte.
+   Ein Finger (oder Maus) waagrecht: um das Ziel drehen. Senkrecht: Ansicht neigen.
+   Zwei Finger (oder Mausrad): zoomen, immer auf die Bildmitte bezogen. */
+function setup3dGestures() {
+  const m = v3.map;
+  m.touchZoomRotate.enable({ around: 'center' });
+  m.touchZoomRotate.disableRotation();
+  m.scrollZoom.enable({ around: 'center' });
+  const el = m.getCanvasContainer();
+  el.style.touchAction = 'none';
+  const pts = new Map();
+  let last = null;
+  el.addEventListener('pointerdown', e => {
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pts.size === 1) {
+      last = [e.clientX, e.clientY];
+      try { el.setPointerCapture(e.pointerId); } catch { /* nicht unterstützt */ }
+      if (v3.spin) setSpin(false);
+    } else last = null;
+  });
+  el.addEventListener('pointermove', e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pts.size !== 1 || !last) return;
+    const dx = e.clientX - last[0], dy = e.clientY - last[1];
+    last = [e.clientX, e.clientY];
+    m.jumpTo({
+      bearing: m.getBearing() - dx * 0.4,
+      pitch: Math.max(0, Math.min(80, m.getPitch() - dy * 0.35))
+    });
+  });
+  const end = e => {
+    pts.delete(e.pointerId);
+    /* Nach einem Zweifinger-Zoom nicht sofort weiterdrehen */
+    last = null;
+  };
+  for (const t of ['pointerup', 'pointercancel']) el.addEventListener(t, end);
+}
+
+function collapseAttrib() {
+  v3el.map.querySelectorAll('.maplibregl-ctrl-attrib').forEach(a => { a.classList.remove('maplibregl-compact-show'); a.removeAttribute('open'); });
+}
+
+function v3pad(action) {
+  const m = v3.map;
+  if (!m) return;
+  setSpin(false);
+  const b = m.getBearing(), p = m.getPitch(), z = m.getZoom();
+  if (action === 'rotl') m.easeTo({ bearing: b + 45, duration: 350 });
+  else if (action === 'rotr') m.easeTo({ bearing: b - 45, duration: 350 });
+  else if (action === 'tilt') m.easeTo({ pitch: p > 30 ? 0 : 62, duration: 450 });
+  else if (action === 'in') m.easeTo({ zoom: Math.min(19.8, z + 0.8), duration: 300 });
+  else if (action === 'out') m.easeTo({ zoom: Math.max(14, z - 0.8), duration: 300 });
+  if (action === 'tilt') syncTilt(p > 30 ? 0 : 62);
+}
+function syncTilt(pitch) {
+  const b = document.querySelector('[data-v3="tilt"]');
+  if (b) b.textContent = pitch > 30 ? '2D' : '3D';
+}
+
+
 
 function close3d() {
   setSpin(false);
@@ -2572,9 +2637,13 @@ function setBig(on) {
 v3el.btn.addEventListener('click', () => { v3el.box.hidden ? open3d() : close3d(); });
 v3el.close.addEventListener('click', close3d);
 v3el.size.addEventListener('click', () => setBig(!v3.big));
-v3el.air.addEventListener('click', () => { v3.air = !v3.air; applyAir(); });
+v3el.air.addEventListener('click', () => { v3.air = !v3.air; applyAir(); if (v3.map) v3.map.once('idle', collapseAttrib); });
 v3el.spin.addEventListener('click', () => setSpin(!v3.spin));
-v3el.center.addEventListener('click', () => { setSpin(false); focus3d(true); });
+v3el.center.addEventListener('click', () => { setSpin(false); focus3d(true); syncTilt(62); });
+document.querySelector('.v3-pad').addEventListener('click', e => {
+  const b = e.target.closest('[data-v3]');
+  if (b) v3pad(b.dataset.v3);
+});
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && v3.big) setBig(false); });
 
 /* ================================================================ Diagnose */
@@ -2670,7 +2739,6 @@ try {
     const b = ui.navBanner.hidden ? 0 : ui.navBanner.getBoundingClientRect().bottom;
     document.documentElement.style.setProperty('--banner-b', `${Math.round(b)}px`);
     layoutFabs(h, b);
-    if (v3.map && !v3el.box.hidden) v3.map.resize();
   });
   ro.observe(ui.routeSheet);
   ro.observe(ui.navBanner);
@@ -2826,7 +2894,6 @@ function onceHint(key, msg, ms = 9000) {
 const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
 document.body.classList.toggle('standalone', isStandalone);
-if (isIOS && !isStandalone) setTimeout(() => onceHint('a2hs', 'Tipp: In Safari über Teilen › Zum Home-Bildschirm als App ablegen. Sie startet dann im Vollbild und schneller.'), 2500);
 
 
 fillSettings();
