@@ -16,6 +16,7 @@
   --ok: #3ccf7e;
   --diag: #c084fc;
   --alt: #8796a3;
+  --oneway: #22c55e;
   --shadow: 0 6px 24px rgba(0, 0, 0, .45);
   --font-ui: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-sign: "Barlow Semi Condensed", "Barlow", "Arial Narrow", system-ui, sans-serif;
@@ -26,13 +27,13 @@
   :root:not([data-theme="dark"]) {
     --bg: #eef1f4; --panel: #ffffff; --panel-2: #eef2f5; --line: #d3dae0;
     --fg: #0f171e; --muted: #56636e; --route: #1d63d8; --contra: #f2a900; --contra-ink: #1b1400;
-    --closure: #d62828; --diag: #7e22ce; --alt: #7f8c98; --shadow: 0 6px 24px rgba(20, 30, 40, .18); color-scheme: light;
+    --closure: #d62828; --diag: #7e22ce; --alt: #7f8c98; --oneway: #16a34a; --shadow: 0 6px 24px rgba(20, 30, 40, .18); color-scheme: light;
   }
 }
 :root[data-theme="light"] {
   --bg: #eef1f4; --panel: #ffffff; --panel-2: #eef2f5; --line: #d3dae0;
   --fg: #0f171e; --muted: #56636e; --route: #1d63d8; --contra: #f2a900; --contra-ink: #1b1400;
-  --closure: #d62828; --diag: #7e22ce; --alt: #7f8c98; --shadow: 0 6px 24px rgba(20, 30, 40, .18); color-scheme: light;
+  --closure: #d62828; --diag: #7e22ce; --alt: #7f8c98; --oneway: #16a34a; --shadow: 0 6px 24px rgba(20, 30, 40, .18); color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -610,3 +611,12 @@ body.landscape .panel-head { padding-top: max(14px, env(safe-area-inset-top, 0px
 .top { grid-template-columns: minmax(0, 1fr); }
 #destInput { width: 100%; min-width: 0; }
 .search { min-width: 0; }
+
+/* ---------- Einbahnstraßen regelgerecht (grün) ---------- */
+.badge.oneway { background: color-mix(in srgb, var(--oneway) 18%, var(--panel)); }
+.badge.oneway i { background: var(--oneway); }
+.oneway-info {
+  display: flex; gap: 10px; align-items: center;
+  background: var(--oneway); color: #04140a; border-radius: 10px; padding: 8px 12px; font-weight: 700; box-shadow: var(--shadow);
+}
+.oneway-info svg { flex: none; stroke-width: 2.6; }

@@ -19,7 +19,7 @@ const DEFAULT_SERVERS = {
   photon: 'https://photon.komoot.io',
   overpass: 'https://overpass-api.de/api/interpreter'
 };
-const APP_VERSION = '2026-10-22.11';
+const APP_VERSION = '2026-10-22.12';
 const OVERPASS_MIRRORS = ['https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 
 /* Diagnoseprotokoll der letzten Routenberechnung */
@@ -903,7 +903,7 @@ function routeStreets(r) {
 const TRACE_ATTRS = ['shape', 'edge.names', 'edge.traversability', 'edge.road_class', 'edge.use', 'edge.roundabout',
   'edge.begin_shape_index', 'edge.end_shape_index', 'edge.length', 'edge.way_id', 'edge.speed', 'edge.forward'];
 
-async function edgeAttributes(route) {
+async function edgeAttributes(route, log = dlog) {
   const { costing, co } = vehicleOptions(true);
   const url = vEndpoint('trace_attributes');
   let last;
@@ -916,7 +916,7 @@ async function edgeAttributes(route) {
       }, 12000);
       if (!res.ok || !data || !Array.isArray(data.edges)) throw new Error(data && data.error ? data.error : 'HTTP ' + res.status);
       return { edges: data.edges, shape: data.shape ? decode6(data.shape) : route.shape, match };
-    } catch (e) { last = e; dlog(`  trace_attributes (${match}) fehlgeschlagen: ${e.message}`); }
+    } catch (e) { last = e; log(`  trace_attributes (${match}) fehlgeschlagen: ${e.message}`); }
   }
   throw last;
 }
@@ -949,7 +949,7 @@ function edgeClass(e) {
    als eigenen Eintrag mit Richtung (heading) und PKW-Freigabe (edge.access.car). Ist in unserer
    Fahrtrichtung keine Spur freigegeben, wohl aber in der Gegenrichtung, wird der Abschnitt
    entgegen der Einbahnrichtung befahren. */
-async function classifyDirection(route, cand) {
+async function classifyDirection(route, cand, log = dlog) {
   for (let i = 0; i < cand.length && i < 150; i += 50) {
     const chunk = cand.slice(i, Math.min(i + 50, 150));
     const locs = chunk.map(it => {
@@ -963,7 +963,7 @@ async function classifyDirection(route, cand) {
       const r = await postJson(vEndpoint('locate'), { locations: locs, costing: 'auto', verbose: true }, 10000);
       if (r.res.ok && Array.isArray(r.data)) data = r.data;
       else throw new Error(r.data && r.data.error ? r.data.error : 'HTTP ' + r.res.status);
-    } catch (e) { dlog(`  locate fehlgeschlagen: ${e.message}`); }
+    } catch (e) { log(`  locate fehlgeschlagen: ${e.message}`); }
     chunk.forEach((it, j) => {
       const edges = (data && data[j] && data[j].edges) || [];
       const same = edges.filter(x => x.edge_info && x.edge_info.way_id === it.e.way_id && x.heading != null);
@@ -972,12 +972,14 @@ async function classifyDirection(route, cand) {
         const withUs = same.some(x => car(x) && angDiff(x.heading, it.brg) <= 60);
         const against = same.some(x => car(x) && angDiff(x.heading, it.brg) >= 120);
         it.contra = !withUs && against;
+        it.legal = withUs && !against;
         it.how = 'locate';
         it.detail = withUs ? (against ? 'beide Richtungen frei' : 'Fahrtrichtung frei') : against ? 'nur Gegenrichtung frei' : 'keine Richtung frei';
       } else {
         /* Ersatzregel: traversability bezieht sich auf die Zeichenrichtung des Wegs */
         const t = it.e.traversability, fw = it.e.forward;
         it.contra = (t === 'forward' && fw === false) || (t === 'backward' && fw === true);
+        it.legal = (t === 'forward' && fw === true) || (t === 'backward' && fw === false);
         it.how = 'Annahme';
         it.detail = `traversability ${t}, forward ${fw}`;
       }
@@ -985,8 +987,37 @@ async function classifyDirection(route, cand) {
   }
 }
 
-async function analyzeEdges(route) {
-  const attr = await edgeAttributes(route);
+function legalRanges(items) {
+  const out = [];
+  let cur = null;
+  for (const it of items) {
+    const e = it.e;
+    if (!it.legal) { if ((e.length || 0) > 0.002) cur = null; continue; }
+    if (!cur) { cur = { i0: it.b, i1: it.en - 1, len: 0, names: [] }; out.push(cur); }
+    cur.i1 = Math.max(cur.i1, it.en - 1);
+    cur.len += (e.length || 0) * 1000;
+    const n = e.names && e.names[0];
+    if (n && !cur.names.includes(n)) cur.names.push(n);
+  }
+  return out;
+}
+
+/* Einbahnstraßen auf einer Route kennzeichnen (regelgerecht grün, entgegen gelb), auch auf der regulären Route */
+async function annotateOneways(route) {
+  if (!route || route.onewayChecked || !route.rawShape) return;
+  route.onewayChecked = true;
+  try {
+    const an = await analyzeEdges(route, { quiet: true, secondPass: false });
+    route.oneways = an.oneways;
+    if (route.contraAllowed && !route.contra.length && an.ranges.length) route.contra = an.ranges;
+  } catch { route.oneways = []; return; }
+  const o = nav.options || {};
+  if (route === nav.route || Object.values(o).includes(route)) { drawRoute(); renderBadges(); }
+}
+
+async function analyzeEdges(route, opts = {}) {
+  const log = opts.quiet ? () => {} : dlog;
+  const attr = await edgeAttributes(route, log);
   const map = indexMapper(route, attr.shape);
   const last = route.shape.length - 1;
   const items = attr.edges.map(e => {
@@ -996,18 +1027,18 @@ async function analyzeEdges(route) {
   });
   const hasTrav = attr.edges.some(e => e.traversability);
   const cand = items.filter(it => (it.e.length || 0) > 0.001 && (!hasTrav || (it.e.traversability && it.e.traversability !== 'both')));
-  dlog(`  ${attr.edges.length} Abschnitte (Abgleich ${attr.match}), davon ${cand.length} mit Einbahnregelung`);
-  if (cand.length) await classifyDirection(route, cand);
+  log(`  ${attr.edges.length} Abschnitte (Abgleich ${attr.match}), davon ${cand.length} mit Einbahnregelung`);
+  if (cand.length) await classifyDirection(route, cand, log);
   /* Zweiter Durchgang: Der Kandidat ist schneller als die reguläre Route, also über alle Abschnitte prüfen */
-  if (!cand.some(it => it.contra)) {
+  if (opts.secondPass !== false && !cand.some(it => it.contra)) {
     const rest = items.filter(it => !cand.includes(it) && (it.e.length || 0) > 0.001);
     if (rest.length) {
-      dlog(`  keine Gegenrichtung unter den markierten Abschnitten, prüfe alle ${rest.length} übrigen Abschnitte`);
-      await classifyDirection(route, rest);
+      log(`  keine Gegenrichtung unter den markierten Abschnitten, prüfe alle ${rest.length} übrigen Abschnitte`);
+      await classifyDirection(route, rest, log);
       rest.filter(it => it.contra).forEach(it => cand.push(it));
     }
   }
-  cand.slice(0, 12).forEach(it => dlog(`    ${(it.e.names && it.e.names[0]) || 'unbenannt'} (${edgeClass(it.e)}, ${Math.round((it.e.length || 0) * 1000)} m): ${it.contra ? 'GEGEN' : 'mit'} Einbahnrichtung, ${it.detail} [${it.how}]`));
+  cand.slice(0, 12).forEach(it => log(`    ${(it.e.names && it.e.names[0]) || 'unbenannt'} (${edgeClass(it.e)}, ${Math.round((it.e.length || 0) * 1000)} m): ${it.contra ? 'GEGEN' : 'mit'} Einbahnrichtung, ${it.detail} [${it.how}]`));
 
   const ranges = [], forbidden = [], rejected = [];
   const seen = new Set();
@@ -1037,7 +1068,7 @@ async function analyzeEdges(route) {
     }
   }
   const out = ranges.map(r => ({ ...r, names: [...r.names], classes: [...r.classes], wayIds: [...r.wayIds] }));
-  return { ranges: out, forbidden, rejected, match: attr.match, edges: attr.edges.length };
+  return { ranges: out, oneways: legalRanges(items), forbidden, rejected, match: attr.match, edges: attr.edges.length };
 }
 
 /* Getrennte Richtungsfahrbahn: parallel zum Abschnitt verläuft in 8–30 m Abstand eine
@@ -1129,7 +1160,7 @@ async function valhallaContra(from, to, normal, token) {
       continue;
     }
     dlog(`  zulässig, Zeitgewinn ${gain.toFixed(1)} s`);
-    if (!best || c.route.time < best.route.time) best = { route: c.route, gain, ranges: an.ranges };
+    if (!best || c.route.time < best.route.time) best = { route: c.route, gain, ranges: an.ranges, oneways: an.oneways };
   }
   return { best, rejected };
 }
@@ -1698,13 +1729,22 @@ function localTrip(G, path) {
       cur.classes.add(e.way.tags.highway); cur.dual = cur.dual || !!e.way.dual;
     } else cur = null;
   });
+  const oneways = [];
+  let oc = null;
+  path.edges.forEach((e, k) => {
+    if (e.way.dir && !e.contra) {
+      if (!oc) { oc = { i0: k, i1: k, len: 0, names: [] }; oneways.push(oc); }
+      oc.i1 = k; oc.len += e.len;
+      if (nameOf(e) && !oc.names.includes(nameOf(e))) oc.names.push(nameOf(e));
+    } else oc = null;
+  });
   return {
     shape, xy, lat0, cum, total: cum[cum.length - 1],
     time: mans.reduce((sum, m) => sum + m.time, 0),
     maneuvers: mans, contraAllowed: true,
     contra: ranges.map(r => ({ ...r, names: [...r.names], classes: [...r.classes] })),
     contraLen: ranges.reduce((sum, r) => sum + r.len, 0),
-    gain: 0, vehicle: settings.vehicle.type, local: true
+    gain: 0, vehicle: settings.vehicle.type, local: true, oneways, onewayChecked: true
   };
 }
 
@@ -1815,6 +1855,8 @@ async function computeRoute(reason = 'new') {
   if (token !== routeToken) return;
   if (vc.best) {
     vc.best.route.contra = vc.best.ranges;
+    vc.best.route.oneways = vc.best.oneways || [];
+    vc.best.route.onewayChecked = true;
     vc.best.route.contraLen = vc.best.ranges.reduce((sum, r) => sum + r.len, 0);
     finishContra(vc.best.route, vc.best.gain, hasNormal, reason, 'Routingserver');
     return;
@@ -1922,6 +1964,7 @@ function applyRoute(route, reason) {
   drawRoute();
   renderBadges();
   renderChoice();
+  if (!route.onewayChecked) annotateOneways(route);
   if (!nav.active) startNav();
   if (reason === 'new') {
     const p = trackingPos();
@@ -1963,6 +2006,8 @@ function drawRoute() {
     L.polyline(a.shape, { pane: 'alt', color: '#0a1424', weight: 11, opacity: .5, interactive: false }).addTo(routeLayer);
     L.polyline(a.shape, { pane: 'alt', color: cssVar('--alt'), weight: 6, opacity: 1, interactive: false }).addTo(routeLayer);
     for (const c of a.contra) L.polyline(a.shape.slice(c.i0, c.i1 + 2), { pane: 'alt', color: contra, weight: 6, opacity: .85, dashArray: '8 8', interactive: false }).addTo(routeLayer);
+    for (const c of a.oneways || []) L.polyline(a.shape.slice(c.i0, c.i1 + 2), { pane: 'alt', color: cssVar('--oneway'), weight: 6, opacity: .8, dashArray: '8 8', interactive: false }).addTo(routeLayer);
+    if (!a.onewayChecked) annotateOneways(a);
     const pick = () => { if (!cmode) selectRoute(alt.kind); };
     L.polyline(a.shape, { pane: 'alt', color: '#000', weight: 28, opacity: .001 }).on('click', pick).addTo(routeLayer);
     /* Beschriftung an der Stelle, welche am weitesten von der gewählten Route entfernt liegt */
@@ -1980,6 +2025,13 @@ function drawRoute() {
   lineCasing = L.polyline(r.shape, { pane: 'route', color: '#0a1424', weight: 12, opacity: .85, interactive: false }).addTo(routeLayer);
   lineDone = L.polyline([], { pane: 'route', color: '#8794a0', weight: 7, opacity: .9, interactive: false }).addTo(routeLayer);
   lineRest = L.polyline(r.shape, { pane: 'route', color: route, weight: 7, opacity: 1, interactive: false }).addTo(routeLayer);
+  /* Regelgerecht befahrene Einbahnstraßen grün, gleiche Zeichnung wie die Gegenrichtung */
+  for (const c of r.oneways || []) {
+    const pts = r.shape.slice(c.i0, c.i1 + 2);
+    L.polyline(pts, { pane: 'contra', color: '#06210f', weight: 14, opacity: .9, interactive: false }).addTo(routeLayer);
+    L.polyline(pts, { pane: 'contra', color: cssVar('--oneway'), weight: 9, opacity: 1, interactive: false }).addTo(routeLayer);
+    L.polyline(pts, { pane: 'contra', color: '#06210f', weight: 2, opacity: .9, dashArray: '2 12', interactive: false }).addTo(routeLayer);
+  }
   for (const c of r.contra) {
     const pts = r.shape.slice(c.i0, c.i1 + 2);
     L.polyline(pts, { pane: 'contra', color: '#1b1400', weight: 14, opacity: .9, interactive: false }).addTo(routeLayer);
@@ -2002,11 +2054,20 @@ function vehicleLabel() {
   return `LKW ${nf2.format(v.height)} m · ${nf2.format(v.weight)} t`;
 }
 
+/* Liegt das Ziel in einer Einbahnstraße? 'oneway' (regelgerecht) | 'contra' (entgegen) | null */
+function destOneway(r) {
+  if (!r) return null;
+  const end = r.total, hit = list => (list || []).some(c => r.cum[Math.min(c.i1 + 1, r.cum.length - 1)] >= end - 25);
+  return hit(r.contra) ? 'contra' : hit(r.oneways) ? 'oneway' : null;
+}
+
 function renderBadges() {
   const r = nav.route;
   const b = [];
   b.push(`<span class="badge"><i></i>${esc(vehicleLabel())}</span>`);
   if (r && r.contra.length) b.push(`<span class="badge contra"><i></i>Gegen Einbahn ${fmtDist(r.contraLen)}</span>`);
+  const de = destOneway(r);
+  if (de) b.push(`<span class="badge ${de}"><i></i>Ziel in Einbahnstraße${de === 'contra' ? ', Anfahrt entgegen' : ''}</span>`);
   if (closures.length) b.push(`<span class="badge closure"><i></i>${closures.length} ${closures.length === 1 ? 'Sperrung' : 'Sperrungen'} berücksichtigt</span>`);
   if (r && r.traffic && (r.traffic.closed || r.traffic.delay >= 60)) b.push(`<span class="badge jam"><i></i>${r.traffic.closed ? 'Sperrung auf Route' : `Stau +${fmtMin(r.traffic.delay)}`}</span>`);
   else if (r && r.detour) b.push(`<span class="badge"><i></i>Stau umfahren</span>`);
@@ -2238,6 +2299,7 @@ function navUpdate() {
     if (s > along && (!nextContra || s < nextContra.at)) nextContra = { c, at: s, dist: s - along };
   }
   ui.maneuver.classList.toggle('contra', !!inContra);
+
   if (inContra) {
     ui.contraWarn.hidden = false;
     ui.contraWarnText.textContent = `Gegen Einbahnrichtung, noch ${fmtDist(inContra.left)}`;
@@ -2483,6 +2545,7 @@ function routeGeo3d() {
   if (r) {
     const ll = p => [p[1], p[0]];
     feats.push({ type: 'Feature', properties: { contra: false }, geometry: { type: 'LineString', coordinates: r.shape.map(ll) } });
+    for (const c of r.oneways || []) feats.push({ type: 'Feature', properties: { contra: false, oneway: true }, geometry: { type: 'LineString', coordinates: r.shape.slice(c.i0, c.i1 + 2).map(ll) } });
     for (const c of r.contra) feats.push({ type: 'Feature', properties: { contra: true }, geometry: { type: 'LineString', coordinates: r.shape.slice(c.i0, c.i1 + 2).map(ll) } });
   }
   return { type: 'FeatureCollection', features: feats };
@@ -2522,7 +2585,7 @@ function setup3dLayers() {
     layout: { 'line-join': 'round', 'line-cap': 'round' }, paint: { 'line-color': '#0a1424', 'line-width': 10, 'line-opacity': 0.75 } }, firstSymbol);
   m.addLayer({ id: 'route3d', type: 'line', source: 'route3d',
     layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': ['case', ['get', 'contra'], cssVar('--contra'), cssVar('--route')], 'line-width': 6 } }, firstSymbol);
+    paint: { 'line-color': ['case', ['get', 'contra'], cssVar('--contra'), ['==', ['get', 'oneway'], true], cssVar('--oneway'), cssVar('--route')], 'line-width': 6 } }, firstSymbol);
 
   m.addSource('ziel', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   m.addLayer({ id: 'ziel-3d', type: 'fill-extrusion', source: 'ziel', paint: {
