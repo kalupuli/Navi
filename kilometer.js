@@ -253,22 +253,261 @@ const ELEK_TEXT = {
   'nicht elektrifiziert': ['ok', 'Laut Datensatz nicht elektrifiziert. Vor Ort prüfen, Bahnbetrieb trotzdem über Notfallmanager einstellen lassen.']
 };
 
+/* ---------- Umfeld der Bahnstelle: Lärmschutzwände, Nachbargleise, Gleislage ---------- */
+
+const LSW_URL = 'https://services-eu1.arcgis.com/XfUqDXJfAezaKUnU/arcgis/rest/services/Schallschutzwand_ArcGIS_Pro/FeatureServer/0/query';
+const wallLayer = L.layerGroup().addTo(map);
+
+function envelope(ll, m) {
+  const dLat = m / 111320, dLon = m / (111320 * Math.cos(toRad(ll[0])));
+  return [ll[1] - dLon, ll[0] - dLat, ll[1] + dLon, ll[0] + dLat].map(v => v.toFixed(6)).join(',');
+}
+const envQuery = (ll, m) => ({ geometry: envelope(ll, m), geometryType: 'esriGeometryEnvelope', inSR: 4326, spatialRel: 'esriSpatialRelIntersects', outSR: 4326 });
+
+/* Gleisachse der Strecke um km herum als Polylinie in Richtung steigender Kilometrierung, je Stützpunkt mit km */
+async function trackAround(nr, km, span) {
+  const c1 = codeFromKm(km - span), c2 = codeFromKm(km + span);
+  const feats = await arcQuery(DB_NET_URL, {
+    where: `strecke_nr=${nr} AND ((von_km_i<=${c2} AND bis_km_i>=${c1}) OR (bis_km_i<=${c2} AND von_km_i>=${c1}))`,
+    outFields: 'von_km_i,bis_km_i', outSR: 4326, returnGeometry: true, resultRecordCount: 400
+  });
+  const parts = feats.map(f => {
+    let v = kmFromCode(f.attributes.von_km_i), b = kmFromCode(f.attributes.bis_km_i), path = pathOf(f);
+    if (v > b) { [v, b] = [b, v]; path = path.slice().reverse(); }
+    return { v, b, path };
+  }).filter(p => p.path.length > 1).sort((x, y) => x.v - y.v);
+  const pts = [];
+  for (const p of parts) {
+    const L = pathLength(p.path);
+    let s = 0;
+    p.path.forEach((ll, i) => {
+      if (i) s += haversine(p.path[i - 1], ll);
+      const kmv = p.v + (p.b - p.v) * (L ? s / L : 0);
+      const last = pts[pts.length - 1];
+      if (last && haversine(last.ll, ll) < 0.5) return;
+      pts.push({ ll, km: kmv });
+    });
+  }
+  if (pts.length < 2) return null;
+  const lat0 = pts[0].ll[0];
+  const xy = pts.map(p => proj(p.ll, lat0));
+  const cum = [0];
+  for (let i = 1; i < xy.length; i++) cum.push(cum[i - 1] + Math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]));
+  return { pts, xy, cum, lat0 };
+}
+
+/* Lage eines Punkts zur Gleisachse: Position s entlang der Achse und seitlicher Abstand d (links positiv) */
+function onTrack(tr, ll) {
+  const P = proj(ll, tr.lat0);
+  let best = null;
+  for (let i = 0; i < tr.xy.length - 1; i++) {
+    const a = tr.xy[i], b = tr.xy[i + 1];
+    const r = segDist(P, a, b);
+    if (!best || r.d < best.dist) {
+      const cross = (b[0] - a[0]) * (P[1] - a[1]) - (b[1] - a[1]) * (P[0] - a[0]);
+      best = { dist: r.d, s: tr.cum[i] + r.t * (tr.cum[i + 1] - tr.cum[i]), d: Math.sign(cross) * r.d, i, brg: planarBearing(a, b) };
+    }
+  }
+  return best;
+}
+function kmAt(tr, s) {
+  let i = 0;
+  while (i < tr.cum.length - 2 && tr.cum[i + 1] < s) i++;
+  const L = tr.cum[i + 1] - tr.cum[i];
+  const f = L ? Math.max(0, Math.min(1, (s - tr.cum[i]) / L)) : 0;
+  return tr.pts[i].km + (tr.pts[i + 1].km - tr.pts[i].km) * f;
+}
+function llAt(tr, s) {
+  let i = 0;
+  while (i < tr.cum.length - 2 && tr.cum[i + 1] < s) i++;
+  const L = tr.cum[i + 1] - tr.cum[i];
+  return lerp(tr.pts[i].ll, tr.pts[i + 1].ll, L ? Math.max(0, Math.min(1, (s - tr.cum[i]) / L)) : 0);
+}
+
+async function wallsAround(tr, here, ll) {
+  const feats = await arcQuery(LSW_URL, { ...envQuery(ll, 1500), outFields: 'hoehe_ok', returnGeometry: true, resultRecordCount: 2000 });
+  const sides = { L: [], R: [] };
+  const drawn = [];
+  for (const f of feats) {
+    const path = pathOf(f);
+    if (path.length < 2) continue;
+    const proj2 = path.map(p => onTrack(tr, p)).filter(o => o && o.dist <= 35 && o.dist >= 1.5);
+    if (proj2.length < 2) continue;
+    const side = proj2.reduce((s, o) => s + Math.sign(o.d), 0) >= 0 ? 'L' : 'R';
+    const s0 = Math.min(...proj2.map(o => o.s)), s1 = Math.max(...proj2.map(o => o.s));
+    sides[side].push({ s0, s1, h: +f.attributes.hoehe_ok || null });
+    drawn.push(path);
+  }
+  const merge = list => {
+    list.sort((a, b) => a.s0 - b.s0);
+    const out = [];
+    for (const w of list) {
+      const last = out[out.length - 1];
+      if (last && w.s0 <= last.s1 + 4) { last.s1 = Math.max(last.s1, w.s1); last.h = Math.max(last.h || 0, w.h || 0) || null; }
+      else out.push({ ...w });
+    }
+    return out;
+  };
+  const sMax = tr.cum[tr.cum.length - 1];
+  const res = {};
+  for (const side of ['L', 'R']) {
+    const list = merge(sides[side]);
+    const cover = list.find(w => w.s0 <= here.s && w.s1 >= here.s);
+    if (cover) {
+      const back = here.s - cover.s0, fwd = cover.s1 - here.s;
+      res[side] = {
+        wall: true, h: cover.h,
+        fwd: { dist: fwd, km: kmAt(tr, cover.s1), ll: llAt(tr, cover.s1), open: cover.s1 < sMax - 5 },
+        back: { dist: back, km: kmAt(tr, cover.s0), ll: llAt(tr, cover.s0), open: cover.s0 > 5 }
+      };
+    } else {
+      const ahead = list.find(w => w.s0 > here.s), behind = [...list].reverse().find(w => w.s1 < here.s);
+      res[side] = { wall: false, ahead: ahead ? { dist: ahead.s0 - here.s, km: kmAt(tr, ahead.s0) } : null, behind: behind ? { dist: here.s - behind.s1, km: kmAt(tr, behind.s1) } : null };
+    }
+  }
+  return { res, drawn, count: feats.length };
+}
+
+async function neighborsAround(nr, info, tr, here, ll) {
+  const feats = await arcQuery(DB_NET_URL, { ...envQuery(ll, 60), outFields: 'strecke_nr,gleisanzah,elektrifiz,strecke_ku', returnGeometry: true, resultRecordCount: 200 });
+  const by = new Map();
+  for (const f of feats) {
+    const a = f.attributes;
+    if (a.strecke_nr === nr) continue;
+    const path = pathOf(f);
+    if (path.length < 2) continue;
+    /* Nächster Punkt der Nachbarstrecke zur Bahnstelle, Richtung dort vergleichen */
+    const lat0 = ll[0], P = proj(ll, lat0);
+    let best = null;
+    for (let i = 0; i < path.length - 1; i++) {
+      const A = proj(path[i], lat0), B = proj(path[i + 1], lat0);
+      const r = segDist(P, A, B);
+      if (!best || r.d < best.d) best = { d: r.d, brg: planarBearing(A, B), pt: lerp(path[i], path[i + 1], r.t) };
+    }
+    if (!best || best.d > 50) continue;
+    const diff = angDiff(best.brg, here.brg);
+    if (diff > 30 && diff < 150) continue;
+    const side = onTrack(tr, best.pt);
+    const prev = by.get(a.strecke_nr);
+    if (!prev || best.d < prev.dist) by.set(a.strecke_nr, { nr: a.strecke_nr, dist: best.d, side: side && side.d >= 0 ? 'links' : 'rechts', gleise: a.gleisanzah || '', elek: a.elektrifiz || '', name: cleanLineName(a.strecke_ku) });
+  }
+  const list = [...by.values()].sort((x, y) => x.dist - y.dist);
+  const own = info.gleise === 'zweigleisig' ? 2 : 1;
+  const total = own + list.reduce((s, n) => s + (n.gleise === 'zweigleisig' ? 2 : 1), 0);
+  let lage, text;
+  if (total <= 1) { lage = 'Eingleisige Strecke'; text = 'Kein Nachbargleis.'; }
+  else if (total === 2) {
+    lage = 'Nachbargleislage';
+    text = own === 2 ? 'Ein Nachbargleis (Gegengleis der eigenen Strecke).' : `Ein Nachbargleis (Strecke ${list[0].nr}).`;
+  } else {
+    lage = 'Innengleislage möglich';
+    text = `${total} Gleise nebeneinander. Je nach betroffenem Gleis liegt dieses zwischen zwei Gleisen.`;
+  }
+  return { lage, text, total, list };
+}
+
+let railCtxToken = 0;
+async function loadRailContext() {
+  const d = dest, info = d && d.kmInfo;
+  if (!info || info.kind !== 'rail') return;
+  const token = ++railCtxToken;
+  info.ctx = { loading: true };
+  renderDestInfo();
+  wallLayer.clearLayers();
+  const ll = [d.lat, d.lon];
+  const ctx = { loading: false };
+  try {
+    const tr = await trackAround(info.nr, info.km, 1.6);
+    if (!tr) throw new Error('Gleisachse nicht verfügbar');
+    const here = onTrack(tr, ll);
+    const [w, n] = await Promise.all([
+      wallsAround(tr, here, ll).catch(e => ({ error: e.message })),
+      neighborsAround(info.nr, info, tr, here, ll).catch(e => ({ error: e.message }))
+    ]);
+    ctx.walls = w; ctx.nb = n;
+    if (token !== railCtxToken || dest !== d) return;
+    /* Karte: Wände dunkelgrau, Lücken grün */
+    if (w && w.drawn) {
+      for (const p of w.drawn) {
+        L.polyline(p, { pane: 'rail', color: '#ffffff', weight: 8, opacity: .8, interactive: false }).addTo(wallLayer);
+        L.polyline(p, { pane: 'rail', color: '#374151', weight: 5, opacity: 1, interactive: false }).addTo(wallLayer);
+      }
+      for (const side of ['L', 'R']) {
+        const r = w.res[side];
+        if (!r || !r.wall) continue;
+        for (const g of [r.fwd, r.back]) if (g.open) {
+          L.marker(g.ll, { keyboard: false, interactive: false, zIndexOffset: 700,
+            icon: L.divIcon({ className: '', iconSize: [0, 0], iconAnchor: [0, 0], html: `<div class="gap-label">Lücke km ${esc(fmtKm(Math.round(g.km * 1000) / 1000))}</div>` }) }).addTo(wallLayer);
+        }
+      }
+    }
+  } catch (e) { ctx.error = e.message; }
+  if (token !== railCtxToken || dest !== d) return;
+  info.ctx = ctx;
+  renderDestInfo();
+}
+
+/* ---------- Zielinformation (Elektrifizierung, Gleislage, Lärmschutz, Fahrtrichtung) ---------- */
+
+let destInfoHidden = load('destInfoHidden', false);
+function setDestInfoHidden(on) { destInfoHidden = on; save('destInfoHidden', on); renderDestInfo(); }
+
+function wallText(r, side) {
+  const name = side === 'L' ? 'Links' : 'Rechts';
+  if (!r) return `${name}: keine Angabe`;
+  if (!r.wall) {
+    const near = [r.ahead && r.ahead.dist < 300 ? `nächste Wand in ${fmtDist(r.ahead.dist)} (km ${fmtKm(Math.round(r.ahead.km * 1000) / 1000)})` : '',
+      r.behind && r.behind.dist < 300 ? `Wandende ${fmtDist(r.behind.dist)} zurück` : ''].filter(Boolean).join(', ');
+    return `${name}: keine Lärmschutzwand${near ? `, ${near}` : ''}`;
+  }
+  const gap = g => g.open ? `${fmtDist(g.dist)} bis km ${fmtKm(Math.round(g.km * 1000) / 1000)}` : `über ${fmtDist(g.dist)}`;
+  return `${name}: Lärmschutzwand${r.h ? ` ${nf1.format(r.h)} m über SO` : ''}. Nächste Lücke ${gap(r.fwd)} (steigende km) oder ${gap(r.back)} (fallende km)`;
+}
+
 function renderDestInfo() {
-  const box = $('destInfo');
+  const box = $('destInfo'), chip = $('destInfoChip');
   const k = dest && dest.kmInfo;
-  if (!k) { box.hidden = true; box.innerHTML = ''; return; }
+  if (!k) { box.hidden = true; box.innerHTML = ''; chip.hidden = true; return; }
+  const warn = k.kind === 'rail' && (k.elek === 'Oberleitung' || k.elek === 'Stromschiene');
+  chip.classList.toggle('warn', warn);
+  chip.innerHTML = `${warn ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>' : ''}Zielhinweise einblenden`;
+  chip.hidden = !destInfoHidden;
+  if (destInfoHidden) { box.hidden = true; return; }
+  const close = '<button type="button" class="di-close" aria-label="Zielhinweise ausblenden" title="Ausblenden"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>';
   if (k.kind === 'bab') {
-    box.className = 'dest-info';
-    box.innerHTML = `<div class="di-head">${esc(k.road)} km ${esc(fmtKm(k.km))}</div>
+    box.innerHTML = `<div class="di-top"><div class="di-head">${esc(k.road)} km ${esc(fmtKm(k.km))}</div>${close}</div>
       <div class="di-sub">${k.dir ? `Fahrtrichtung ${esc(k.dir)}` : 'Fahrtrichtung offen'}${k.here ? ` · bei ${esc(k.here)}` : ''}</div>`;
   } else {
     const [lvl, txt] = ELEK_TEXT[k.elek] || ['warn', `Elektrifizierung: ${k.elek}. Vor Ort prüfen.`];
-    box.className = 'dest-info';
-    box.innerHTML = `<div class="di-head">Strecke ${k.nr} km ${esc(fmtKm(k.km))}</div>
+    const c = k.ctx || {};
+    let lage = '', more = '';
+    if (c.loading) lage = '<div class="di-row muted">Prüfe Gleislage und Lärmschutzwände</div>';
+    else if (c.error) lage = `<div class="di-row muted">Umfeld nicht abrufbar: ${esc(c.error)}</div>`;
+    else {
+      const nb = c.nb || {};
+      if (nb.error) lage = `<div class="di-row muted">Gleislage nicht abrufbar: ${esc(nb.error)}</div>`;
+      else if (nb.lage) {
+        lage = `<div class="di-row"><b>${esc(nb.lage)}:</b> ${esc(nb.text)}</div>`;
+        const elekNb = nb.list.filter(n => n.elek === 'Oberleitung' || n.elek === 'Stromschiene');
+        if (nb.list.length) more += `<div class="di-row"><b>Nachbargleise:</b> ${nb.list.map(n => `Strecke ${n.nr} (${esc(n.gleise)}, ${esc(n.elek)}) ${n.side} in ca. ${Math.round(n.dist)} m`).join(', ')}.</div>`;
+        if (elekNb.length && k.elek !== 'Oberleitung' && k.elek !== 'Stromschiene') more += `<div class="di-row warnline">Nachbarstrecke elektrifiziert: Abschaltung und Erdung auch für Strecke ${elekNb.map(n => n.nr).join(', ')} anfordern.</div>`;
+        else if (elekNb.length) more += `<div class="di-row warnline">Abschaltung und Erdung auch für Strecke ${elekNb.map(n => n.nr).join(', ')} anfordern.</div>`;
+      }
+      const w = c.walls || {};
+      if (w.error) more += `<div class="di-row muted">Lärmschutzwände nicht abrufbar: ${esc(w.error)}</div>`;
+      else if (w.res) {
+        const any = w.res.L.wall || w.res.R.wall;
+        lage += `<div class="di-row"><b>Lärmschutzwand:</b> ${any ? `${[w.res.L.wall ? 'links' : '', w.res.R.wall ? 'rechts' : ''].filter(Boolean).join(' und ')} vorhanden` : 'keine an dieser Stelle'}</div>`;
+        more += `<div class="di-row">${esc(wallText(w.res.L, 'L'))}.</div><div class="di-row">${esc(wallText(w.res.R, 'R'))}.</div>`;
+      }
+    }
+    box.innerHTML = `<div class="di-top"><div class="di-head">Strecke ${k.nr} km ${esc(fmtKm(k.km))}</div>${close}</div>
       <div class="di-sub">${esc([k.name, k.gleise, k.art, k.speed].filter(Boolean).join(' · '))}</div>
       <div class="di-elek ${lvl}">${lvl === 'warn' ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>' : ''}<span>${esc(txt)}</span></div>
-      <div class="di-src">DB Geo-Streckennetz, Stand 2020</div>`;
+      ${lage}<div class="di-more">${more}</div>
+      <div class="di-src">Seiten in Richtung steigender Kilometrierung. Gleislage aus Streckenachsen, betroffenes Gleis vor Ort klären. Lücken = Wandenden, Türen sind nicht erfasst. Quellen: DB Geo-Streckennetz (Stand 2020), EBA Lärmkartierung Runde 4.</div>`;
   }
+  box.querySelector('.di-close').addEventListener('click', () => setDestInfoHidden(true));
   box.hidden = false;
 }
 
@@ -278,3 +517,11 @@ function announceDestInfo() {
   if (k.elek === 'Oberleitung') say('Ziel an elektrifizierter Bahnstrecke mit Oberleitung.');
   else if (k.elek === 'Stromschiene') say('Ziel an elektrifizierter Bahnstrecke mit Stromschiene.');
 }
+
+function onDestChosen() {
+  wallLayer.clearLayers();
+  renderDestInfo();
+  announceDestInfo();
+  loadRailContext();
+}
+$('destInfoChip').addEventListener('click', () => setDestInfoHidden(false));

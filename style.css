@@ -551,3 +551,32 @@ input[type="text"] {
 
 /* Einblendungen nehmen keine Tipps an, die Karte darunter bleibt bedienbar */
 .toast { pointer-events: none; }
+
+/* ---------- Zielhinweise: Umfeld Bahn, ausblendbar ---------- */
+.di-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.di-close { flex: none; width: 34px; height: 34px; margin: -4px -6px 0 0; display: grid; place-items: center; border: 0; border-radius: 9px; background: transparent; color: var(--muted); }
+.di-close svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+.di-row { font-size: 13.5px; line-height: 1.4; }
+.di-row.muted { color: var(--muted); }
+.di-row.warnline { font-weight: 700; color: var(--contra-ink); background: color-mix(in srgb, var(--contra) 55%, var(--panel)); padding: 4px 8px; border-radius: 7px; }
+.di-more { display: grid; gap: 4px; }
+.sheet.collapsed .di-more { display: none; }
+.di-chip {
+  justify-self: start; display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg);
+  font: 600 14px/1.2 var(--font-ui);
+}
+.di-chip.warn { background: var(--contra); color: var(--contra-ink); border-color: transparent; }
+.di-chip svg { width: 16px; height: 16px; fill: currentColor; stroke: none; }
+.gap-label {
+  position: absolute; transform: translate(-50%, -130%); white-space: nowrap; pointer-events: none;
+  padding: 3px 8px; border-radius: 7px; font: 700 12.5px/1.2 var(--font-ui); background: #15803d; color: #fff; box-shadow: 0 2px 8px rgba(0, 0, 0, .35);
+}
+
+/* Routenblatt nie höher als der freie Platz unter dem Banner, Inhalt scrollt */
+.sheet {
+  max-height: calc(100vh - var(--banner-b, 110px) - 16px);
+  max-height: calc(100dvh - var(--banner-b, 110px) - 16px);
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+body.landscape .sheet { max-height: none; }

@@ -19,7 +19,7 @@ const DEFAULT_SERVERS = {
   photon: 'https://photon.komoot.io',
   overpass: 'https://overpass-api.de/api/interpreter'
 };
-const APP_VERSION = '2026-10-22.8';
+const APP_VERSION = '2026-10-22.9';
 const OVERPASS_MIRRORS = ['https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 
 /* Diagnoseprotokoll der letzten Routenberechnung */
@@ -574,8 +574,7 @@ function chooseDest(d) {
   nav.pref = 'auto';
   enableCompass();
   if (!v3el.box.hidden) { v3el.addr.textContent = dest.label; focus3d(true); }
-  renderDestInfo();
-  announceDestInfo();
+  onDestChosen();
   computeRoute('new');
 }
 
@@ -2115,7 +2114,9 @@ function stopNav() {
   stopTrafficTimer();
   TRAFFIC.layer.clearLayers();
   railLayer.clearLayers();
+  wallLayer.clearLayers();
   $('destInfo').hidden = true;
+  $('destInfoChip').hidden = true;
   $('trafficWarn').hidden = true;
   close3d();
   setBig(false);
