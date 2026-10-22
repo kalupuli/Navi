@@ -17,7 +17,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@600;700&display=swap">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-  <link rel="stylesheet" href="style.css?v=2026-10-22.7">
+  <link rel="stylesheet" href="style.css?v=2026-10-22.8">
 </head>
 <body>
   <div id="map" aria-label="Karte"></div>
@@ -27,7 +27,7 @@
     <div class="search">
       <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
       <input id="destInput" type="search" inputmode="search" enterkeyhint="go" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
-             placeholder="Einsatzziel: Straße Hausnummer Ort" aria-label="Einsatzziel">
+             placeholder="Adresse, A5 km 487,3 oder Strecke 4000 km 12,3" aria-label="Einsatzziel">
       <button id="clearDest" class="icon-btn" type="button" aria-label="Eingabe leeren" hidden>
         <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
@@ -57,6 +57,10 @@
       </div>
     </div>
     <div id="mnvNext" class="mnv-next" hidden></div>
+    <div id="trafficWarn" class="traffic-warn" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="11" width="18" height="6" rx="2"/><path d="M5 11l2-5h10l2 5M7 17v2M17 17v2"/></svg>
+      <span id="trafficWarnText">Stau</span>
+    </div>
     <div id="contraWarn" class="contra-warn" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.5"/></svg>
       <span id="contraWarnText">Einbahnstraße gegen die Fahrtrichtung</span>
@@ -94,6 +98,7 @@
   <!-- Unterer Bereich: Route -->
   <section id="routeSheet" class="sheet" hidden>
     <button id="sheetToggle" class="sheet-handle" type="button" aria-expanded="true" aria-controls="routeSheet" aria-label="Details ausblenden"><span></span></button>
+    <div id="destInfo" class="dest-info" hidden></div>
     <div class="route-stats">
       <div class="stat"><span id="etaClock" class="big">--:--</span><span class="lbl">Ankunft</span></div>
       <div class="stat"><span id="remTime" class="big">--</span><span class="lbl">Minuten</span></div>
@@ -187,6 +192,19 @@
       </section>
 
       <section class="group">
+        <h3>Verkehrslage</h3>
+        <label class="switch"><input id="optTraffic" type="checkbox"><span>Aktuelle Verkehrslage berücksichtigen</span></label>
+        <label class="row-field">Umfahrung ab Verzögerung
+          <span class="unit-input"><input id="optJam" type="number" inputmode="decimal" min="0.5" max="60" step="0.5"><i>min</i></span>
+        </label>
+        <label class="switch"><input id="optAutobahnApi" type="checkbox"><span>Meldungen der Autobahn GmbH (ohne Schlüssel)</span></label>
+        <label class="switch"><input id="optFlow" type="checkbox"><span>Verkehrsfluss auf der Karte (TomTom)</span></label>
+        <label class="field-lbl" for="optTomtom">TomTom API-Schlüssel</label>
+        <input id="optTomtom" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="ohne Schlüssel nur Autobahnmeldungen">
+        <p class="hint">Staus, Unfälle und Sperrungen auf allen Straßen liefert TomTom. Ein kostenloser Schlüssel ist unter developer.tomtom.com erhältlich. Ohne Schlüssel werden die Meldungen der Autobahn GmbH zu den Autobahnen auf der Route genutzt. Die Lage wird während der Fahrt alle zwei Minuten aktualisiert. Überschreitet die Verzögerung den Grenzwert oder liegt eine Sperrung auf der Route, wird eine Umfahrung berechnet. Die Route durch den Stau bleibt wählbar, etwa für die Fahrt durch die Rettungsgasse.</p>
+      </section>
+
+      <section class="group">
         <h3>Navigation</h3>
         <label class="switch"><input id="optVoice" type="checkbox"><span>Sprachansagen</span></label>
         <label class="switch"><input id="optNight" type="checkbox"><span>Nachtkarte</span></label>
@@ -249,6 +267,8 @@
   <div id="scrim" class="scrim" hidden></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-  <script src="app.js?v=2026-10-22.7"></script>
+  <script src="app.js?v=2026-10-22.8"></script>
+  <script src="verkehr.js?v=2026-10-22.8"></script>
+  <script src="kilometer.js?v=2026-10-22.8"></script>
 </body>
 </html>

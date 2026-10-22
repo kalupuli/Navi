@@ -1,6 +1,6 @@
 # Einsatznavigation
 
-Browserbasierte Navigation für Einsatzfahrten mit Sperrungen, Gegenrichtung in Einbahnstraßen und Fahrzeugprofil für PKW und LKW. Die Anwendung besteht aus drei Dateien (`index.html`, `style.css`, `app.js`) und benötigt keine Installation.
+Browserbasierte Navigation für Einsatzfahrten mit Sperrungen, Gegenrichtung in Einbahnstraßen und Fahrzeugprofil für PKW und LKW. Die Anwendung besteht aus HTML, CSS und drei Skriptdateien (`app.js`, `verkehr.js`, `kilometer.js`) und benötigt keine Installation.
 
 ## Betrieb
 
@@ -21,6 +21,14 @@ Der Standortzugriff wird vom Browser nur in einem sicheren Kontext freigegeben. 
 **Gegenrichtung Einbahnstraße:** Die Prüfung erfolgt in zwei Stufen. Zunächst berechnet der Routingserver neben der regulären Route mehrere Kandidaten mit aufgehobener Einbahnbeschränkung (schnellste, kürzeste und Alternativen). Für jeden Kandidaten mit Zeitgewinn wird über `trace_attributes` je Abschnitt die zulässige Fahrtrichtung abgefragt. Abschnitte entgegen der Einbahnrichtung werden somit eindeutig erkannt. Getrennte Richtungsfahrbahnen werden über `locate` an einer parallelen Fahrbahn gleichen Namens erkannt. Liefert der Server keinen zulässigen schnelleren Weg, wird ersatzweise das Straßennetz um die Route über Overpass geladen und selbst gerechnet. Abschnitte gegen die Einbahnrichtung erscheinen gelb, zusätzlich erfolgen ein Hinweis im Manöverbanner und eine Sprachansage. Unter „Diagnose“ im Routenblatt wird jeder Prüfschritt protokolliert.
 
 **Routenwahl:** Wird ein schnellerer Weg gegen die Einbahnrichtung gefunden, bleibt die Route ohne Gegenrichtung als graue Alternative auf der Karte sichtbar und wird mit ihrer Fahrzeit beschriftet. Im Routenblatt stehen beide Routen mit Fahrzeit und Länge zur Auswahl. Umgeschaltet wird per Tipp auf die Auswahl, auf die graue Linie oder auf deren Beschriftung. Die gewählte Variante bleibt bei Neuberechnungen bis zum nächsten Ziel erhalten.
+
+**Verkehrslage:** Aktuelle Staus, Unfälle und Sperrungen werden auf die Route abgebildet. Berücksichtigt werden nur Meldungen in der eigenen Fahrtrichtung, ein Stau auf der Gegenfahrbahn bleibt unbeachtet. Gestaute Abschnitte erscheinen auf der Karte rot, Sperrungen schwarz gestrichelt, an der Route mit Angabe der Verzögerung. Die Verzögerung fließt in Ankunftszeit und Restzeit ein. Vor einem Stau erscheint ein roter Hinweis im Manöverbanner mit Ansage. Überschreitet die Verzögerung den Grenzwert (Standard 3 Minuten) oder liegt eine Sperrung auf der Route, werden die gestauten Abschnitte für den Routingserver ausgeschlossen und eine Umfahrung berechnet. Ist sie insgesamt schneller, wird sie gewählt. Die Route durch den Stau bleibt in der Routenwahl als „Durch Stau“ verfügbar, etwa für die Fahrt durch die Rettungsgasse, und bleibt bei Neuberechnungen gewählt. Während der Fahrt wird die Lage alle zwei Minuten aktualisiert. Entsteht ein Stau oberhalb des Grenzwerts, wird automatisch neu berechnet.
+
+**Datenquellen Verkehr:** Ohne Schlüssel werden die Meldungen der Autobahn GmbH (verkehr.autobahn.de) für alle Autobahnen auf der Route abgefragt, einschließlich Reisezeitverlust. Mit einem kostenlosen TomTom-Schlüssel (developer.tomtom.com, Eintrag in den Einstellungen) kommen Meldungen auf allen Straßen und auf Wunsch die Verkehrsflusskarte hinzu. Meldungen beider Quellen zum selben Stau werden nur einmal gezählt.
+
+**Kilometrierung Autobahn:** Eingabe zum Beispiel „A5 km 487,3“, „A 5 487.3“ oder „BAB A3 km 120“. Die Position wird zwischen den Kilometerpunkten interpoliert. Zur Auswahl stehen beide Fahrtrichtungen, benannt nach dem Ort rund 20 km voraus. Die Route wird auf die Richtungsfahrbahn der gewählten Fahrtrichtung geführt.
+
+**Kilometrierung Bahn:** Eingabe zum Beispiel „Strecke 4000 km 12,345“, „4000 km 2,3 + 45“ (DB-Schreibweise) oder „Bahn 6100 12,4“. Angegeben wird die Streckennummer nach VzG, nicht die Kursbuchnummer. Mit „Strecke 4000“ ohne Kilometer wird die ganze Strecke auf der Karte angezeigt, farbig nach Elektrifizierung (violett Oberleitung, pink Stromschiene, grau gestrichelt nicht elektrifiziert). Ein Tipp auf die Strecke zeigt den Kilometer an dieser Stelle und setzt ihn auf Wunsch als Ziel. Im Routenblatt erscheinen Streckenname, Gleisanzahl, Bahnart, Geschwindigkeit und ein deutlicher Hinweis zur Elektrifizierung. Bei Oberleitung oder Stromschiene erfolgt zusätzlich eine Ansage. Die Bahndaten entsprechen dem DB Geo-Streckennetz mit Stand 2020 und sind vor Ort zu prüfen. Die Zufahrt führt zur nächstgelegenen Straße.
 
 **Zulässigkeit der Gegenrichtung:** Autobahnen, Kraftfahrstraßen, deren Rampen und Kreisverkehre sind grundsätzlich ausgenommen. Getrennte Richtungsfahrbahnen werden an einer parallelen Gegenfahrbahn gleichen Namens erkannt und nur nach Freigabe in den Einstellungen genutzt. Poller, gesperrte Zufahrten, eingetragene Sperrungen und im LKW-Profil die Fahrzeugmaße werden auch im eigenen Wegenetz beachtet. Wird eine schnellere Gegenrichtung aus einem dieser Gründe verworfen, nennt die App Straße und Grund.
 
@@ -45,6 +53,9 @@ Der Standortzugriff wird vom Browser nur in einem sicheren Kontext freigegeben. 
 | Routing | Valhalla (FOSSGIS) | Server |
 | Rückfallebene Gegenrichtung | Overpass API | Server |
 | 3D-Ansicht | MapLibre GL, OpenFreeMap (Gebäude), Mapzen Terrain Tiles (Gelände), Esri World Imagery (Luftbild) | fest |
+| Verkehrslage | Autobahn GmbH (verkehr.autobahn.de), TomTom Traffic (mit Schlüssel) | Verkehrslage |
+| Kilometrierung Autobahn | NPGeo-Kat (vfdb), Dienst „Kilometrierungen der Bundesautobahnen“ | fest |
+| Kilometrierung Bahn | NPGeo-Kat (vfdb), Dienst „Deutsche Bahn Streckennetz“ (DB Geo-Streckennetz, Stand 2020) | fest |
 
 Die öffentlichen Server stehen ohne Verfügbarkeitszusage zur Verfügung und sind nicht für einen Leitstellen- oder Flottenbetrieb vorgesehen. Für den dienstlichen Einsatz wird ein eigener Valhalla-Server (Docker-Image `ghcr.io/valhalla/valhalla`) mit OSM-Auszug des Einsatzgebiets betrieben und dessen Adresse unter „Server“ eingetragen. Gleiches gilt bei Bedarf für Photon und Overpass. Das Luftbild von Esri unterliegt deren Nutzungsbedingungen und ist für einen dienstlichen Dauerbetrieb gesondert zu klären.
 

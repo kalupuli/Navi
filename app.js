@@ -19,7 +19,7 @@ const DEFAULT_SERVERS = {
   photon: 'https://photon.komoot.io',
   overpass: 'https://overpass-api.de/api/interpreter'
 };
-const APP_VERSION = '2026-10-22.7';
+const APP_VERSION = '2026-10-22.8';
 const OVERPASS_MIRRORS = ['https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 
 /* Diagnoseprotokoll der letzten Routenberechnung */
@@ -83,7 +83,8 @@ const DEFAULTS = {
   night: false,
   radius: 20,
   layer: 'osm',
-  servers: { ...DEFAULT_SERVERS }
+  servers: { ...DEFAULT_SERVERS },
+  traffic: { enabled: true, key: '', threshold: 3, flow: true, autobahn: true, interval: 2 }
 };
 
 /* ================================================================ Speicher */
@@ -461,7 +462,8 @@ function renderSuggestions(items, head) {
     li.setAttribute('role', 'option');
     li.setAttribute('aria-selected', k === selIdx ? 'true' : 'false');
     li.innerHTML = `<span class="s-main">${esc(it.label)}</span>${it.sub ? `<span class="s-sub">${esc(it.sub)}</span>` : ''}`;
-    li.addEventListener('pointerdown', e => { e.preventDefault(); chooseDest(it); });
+    if (it.disabled) li.classList.add('s-msg');
+    else li.addEventListener('pointerdown', e => { e.preventDefault(); chooseDest(it); });
     ui.suggestions.appendChild(li);
   });
   ui.suggestions.hidden = items.length === 0;
@@ -478,6 +480,20 @@ async function runSearch(q) {
   lastQuery = q;
   const coord = parseCoords(q);
   if (coord) { renderSuggestions([coord]); return [coord]; }
+  const sp = parseSpecial(q);
+  if (sp) {
+    renderSuggestions([{ label: sp.type === 'bab' ? `Suche ${sp.road} km ${fmtKm(sp.km)}` : `Suche Strecke ${sp.nr}${sp.km != null ? ` km ${fmtKm(sp.km)}` : ''}`, sub: 'Kilometrierung wird abgefragt', disabled: true }]);
+    try {
+      const items = await specialSearch(sp);
+      if (ui.destInput.value !== q) return items;
+      renderSuggestions(items, sp.type === 'bab' ? 'Fahrtrichtung wählen' : '');
+      return items;
+    } catch (e) {
+      const msg = [{ label: e.message, sub: 'Eingabe prüfen, z. B. „A5 km 487,3“ oder „Strecke 4000 km 12,345“', disabled: true }];
+      if (ui.destInput.value === q) renderSuggestions(msg);
+      return [];
+    }
+  }
   if (q.trim().length < 3) { showRecents(); return []; }
   try {
     const items = await photonSearch(q);
@@ -511,7 +527,7 @@ ui.destInput.addEventListener('keydown', async e => {
     let items = suggestionItems;
     if (!items.length || lastQuery !== ui.destInput.value) items = await runSearch(ui.destInput.value);
     const it = items[Math.max(0, selIdx)];
-    if (it) chooseDest(it); else toast('Kein Treffer für diese Eingabe', 'warn');
+    if (it && !it.disabled) chooseDest(it); else if (!it) toast('Kein Treffer für diese Eingabe', 'warn');
   } else if (e.key === 'Escape') {
     ui.suggestions.hidden = true;
   }
@@ -521,7 +537,7 @@ ui.clearDest.addEventListener('click', () => {
 });
 
 function addRecent(d) {
-  recents = [{ lat: d.lat, lon: d.lon, label: d.label, sub: d.sub || '' },
+  recents = [{ lat: d.lat, lon: d.lon, label: d.label, sub: d.sub || '', loc: d.loc || null, kmInfo: d.kmInfo || null },
     ...recents.filter(r => haversine([r.lat, r.lon], [d.lat, d.lon]) > 15)].slice(0, 8);
   save('recents', recents);
 }
@@ -543,7 +559,9 @@ const destIcon = L.divIcon({
 });
 
 function chooseDest(d) {
-  dest = { lat: d.lat, lon: d.lon, label: d.label, sub: d.sub || '' };
+  if (d.action) { ui.suggestions.hidden = true; ui.destInput.blur(); d.action(); return; }
+  if (!d.kmInfo || d.kmInfo.kind !== 'rail') railLayer.clearLayers();
+  dest = { lat: d.lat, lon: d.lon, label: d.label, sub: d.sub || '', loc: d.loc || null, kmInfo: d.kmInfo || null };
   ui.destInput.value = d.label;
   ui.suggestions.hidden = true;
   ui.destInput.blur();
@@ -556,6 +574,8 @@ function chooseDest(d) {
   nav.pref = 'auto';
   enableCompass();
   if (!v3el.box.hidden) { v3el.addr.textContent = dest.label; focus3d(true); }
+  renderDestInfo();
+  announceDestInfo();
   computeRoute('new');
 }
 
@@ -820,13 +840,17 @@ async function postJson(url, body, ms = 15000) {
   return { res, data };
 }
 
+/* Ausschlussflächen für gestaute Abschnitte, gelten für alle Berechnungen der laufenden Routensuche */
+let activeTrafficRings = [];
+
 async function valhalla(from, to, { contra = false, extraRings = [], extraCo = {}, alternates = 0 } = {}) {
   const { costing, co } = vehicleOptions(contra);
   const loc0 = { lat: +from.lat.toFixed(6), lon: +from.lon.toFixed(6), type: 'break' };
   if (from.heading != null && (from.speed ?? 0) > 2.5) { loc0.heading = Math.round(from.heading); loc0.heading_tolerance = 60; }
-  const rings = closures.map(closureRing).concat(extraRings);
+  const rings = closures.map(closureRing).concat(activeTrafficRings, extraRings);
+  const loc1 = { lat: +to.lat.toFixed(6), lon: +to.lon.toFixed(6), type: 'break', ...(to.loc || {}) };
   const body = {
-    locations: [loc0, { lat: +to.lat.toFixed(6), lon: +to.lon.toFixed(6), type: 'break' }],
+    locations: [loc0, loc1],
     costing,
     costing_options: { [costing]: { ...co, ...extraCo } },
     language: 'de-DE',
@@ -1074,7 +1098,8 @@ async function valhallaContra(from, to, normal, token) {
     const c = queue[n];
     if (tried.has(c.route.rawShape)) continue;
     tried.add(c.route.rawShape);
-    const gain = normal ? normal.time - c.route.time : Infinity;
+    if (trafficOn()) annotateTraffic(c.route);
+    const gain = normal ? effTime(normal) - effTime(c.route) : Infinity;
     dlog(`${c.label}: ${fmtDur(c.route.time)}, ${fmtDist(c.route.total)}: ${routeStreets(c.route)}`);
     if (gain < minGain) { dlog(gain > 0 ? `  nur ${gain.toFixed(1)} s schneller, Schwelle ${minGain} s` : gain === 0 ? '  gleich schnell wie reguläre Route' : `  ${(-gain).toFixed(1)} s langsamer als reguläre Route`); continue; }
     let an;
@@ -1735,21 +1760,53 @@ async function computeRoute(reason = 'new') {
   if (closures.length) dlog(`${closures.length} Sperrungen aktiv`);
   nav.lastReroute = Date.now();
   if (!nav.route || reason === 'new') { ui.mnvDist.textContent = ''; ui.mnvInstr.textContent = 'Route wird berechnet'; }
-  setStatus(reason === 'reroute' ? 'Neuberechnung ab aktuellem Standort' : 'Route wird berechnet');
+  setStatus(reason === 'reroute' ? 'Neuberechnung ab aktuellem Standort' : reason === 'traffic' ? 'Neuberechnung wegen Verkehrslage' : 'Route wird berechnet');
 
   const wantContra = !!settings.contra.enabled;
-  const normal = await valhalla(from, dest, { contra: false }).catch(e => ({ error: e }));
+  activeTrafficRings = [];
+  nav.trafficMsg = '';
+  let normal = await valhalla(from, dest, { contra: false }).catch(e => ({ error: e }));
   if (token !== routeToken) return;
   const hasNormal = !normal.error;
   if (hasNormal) {
     const streets = [...new Set(normal.maneuvers.flatMap(m => m.street_names || []))].join(' > ');
     dlog(`Routingserver regulär: ${fmtDur(normal.time)}, ${fmtDist(normal.total)}: ${streets}`);
   } else dlog(`Routingserver regulär fehlgeschlagen: ${normal.error.message}`);
-  nav.options = { legal: hasNormal ? normal : null, contra: null };
+  nav.options = { legal: hasNormal ? normal : null, contra: null, jam: null };
   if (hasNormal) {
     applyRoute(normal, reason);
     setStatus(wantContra ? 'Prüfe schnelleren Weg gegen Einbahnrichtung' : '');
     if (reason === 'reroute') say('Route neu berechnet.');
+  }
+
+  /* Verkehrslage: Staus auf der regulären Route, ab Grenzwert Umfahrung */
+  if (hasNormal && trafficOn()) {
+    const tr = await trafficStage(from, normal, token);
+    if (token !== routeToken) return;
+    if (tr && tr.jam) {
+      activeTrafficRings = tr.rings;
+      normal = tr.route;
+      normal.detour = true;
+      nav.options = { legal: normal, contra: null, jam: tr.jam };
+      const saved = effTime(tr.jam) - effTime(normal);
+      const why = tr.jam.traffic.closed ? 'Sperrung auf der Route' : `Stau auf der Route, +${fmtMin(tr.jam.traffic.delay)}`;
+      if (nav.pref === 'jam') {
+        applyRoute(tr.jam, 'switch');
+        nav.trafficMsg = `${why}. Route durch den Stau bleibt gewählt, Umfahrung wäre ${fmtMin(saved)} schneller.`;
+        setStatus(nav.trafficMsg);
+      } else {
+        applyRoute(normal, reason === 'new' ? 'upgrade' : reason);
+        nav.trafficMsg = `${why}. Umfahrung gewählt, ${tr.jam.traffic.closed ? 'Sperrung wird umfahren' : fmtMin(saved) + ' schneller'}.`;
+        setStatus(nav.trafficMsg);
+        toast(`${why}. Umfahrung gewählt.`, 'warn', 6000);
+        say(tr.jam.traffic.closed ? 'Sperrung auf der Route. Umfahrung gewählt.' : `Stau auf der Route, plus ${Math.round(tr.jam.traffic.delay / 60)} Minuten. Umfahrung gewählt.`, true);
+      }
+      dlog(`Ergebnis Verkehr: Umfahrung ${fmtDur(effTime(normal))}, durch Stau ${tr.jam.traffic.closed ? 'gesperrt' : fmtDur(effTime(tr.jam))}`);
+    } else {
+      renderBadges(); drawTraffic();
+      const d = normal.traffic ? normal.traffic.delay : 0;
+      setStatus(d >= 60 ? `Verkehr auf der Route +${fmtMin(d)}, unter dem Grenzwert für eine Umfahrung` : wantContra ? 'Prüfe schnelleren Weg gegen Einbahnrichtung' : '');
+    }
   }
   if (!wantContra) { if (!hasNormal) routeFailed(normal.error); return; }
 
@@ -1809,6 +1866,8 @@ async function computeRoute(reason = 'new') {
 
 function declineContra(hasNormal, normal, rejected, fallback, reason) {
   if (!hasNormal) { routeFailed(normal.error); return; }
+  /* Hinweis zur Stauumfahrung nicht überschreiben */
+  if (nav.options && nav.options.jam && !rejected.length) { dlog(`Ergebnis Gegenrichtung: ${fallback}`); setStatus(nav.trafficMsg || ''); return; }
   if (rejected.length) {
     const txt = `Gegenrichtung verworfen: ${rejectedText(rejected)}. Freigabe in den Einstellungen.`;
     dlog(`Ergebnis: ${txt}`);
@@ -1822,11 +1881,12 @@ function declineContra(hasNormal, normal, rejected, fallback, reason) {
 
 function finishContra(cf, gain, hasNormal, reason, source) {
   cf.gain = gain;
-  nav.options = { legal: hasNormal ? nav.options && nav.options.legal : null, contra: cf };
-  if (hasNormal && nav.pref === 'legal') {
+  if (trafficOn() && !cf.traffic) annotateTraffic(cf);
+  nav.options = { legal: hasNormal ? nav.options && nav.options.legal : null, contra: cf, jam: (nav.options && nav.options.jam) || null };
+  if (hasNormal && (nav.pref === 'legal' || nav.pref === 'jam')) {
     dlog(`Ergebnis: Gegenrichtung gefunden (${source}), Gewinn ${gain.toFixed(1)} s. Route ohne Gegenrichtung bleibt gewählt.`);
     drawRoute(); renderChoice();
-    setStatus(`Route ohne Gegenrichtung gewählt. Gegen Einbahnrichtung wäre ${fmtDur(gain)} schneller.`);
+    setStatus(`${nav.pref === 'jam' ? 'Route durch den Stau' : 'Route ohne Gegenrichtung'} gewählt. Gegen Einbahnrichtung wäre ${fmtDur(gain)} schneller.`);
     return;
   }
   dlog(`Ergebnis: Gegenrichtung übernommen (${source}), Gewinn ${gain.toFixed(1)} s, ${fmtDist(cf.contraLen)} gegen Einbahnrichtung`);
@@ -1871,12 +1931,27 @@ function applyRoute(route, reason) {
   navUpdate();
 }
 
-function altRoute() {
+const ROUTE_KINDS = ['contra', 'legal', 'jam'];
+function routeKinds() {
   const o = nav.options;
-  if (!o || !o.legal || !o.contra || !nav.route) return null;
-  if (nav.route === o.contra) return { kind: 'legal', route: o.legal };
-  if (nav.route === o.legal) return { kind: 'contra', route: o.contra };
-  return null;
+  return o ? ROUTE_KINDS.filter(k => o[k]) : [];
+}
+function currentKind() {
+  const o = nav.options;
+  return o ? ROUTE_KINDS.find(k => o[k] && o[k] === nav.route) : null;
+}
+function kindTitle(k) {
+  const o = nav.options || {};
+  if (k === 'contra') return 'Gegen Einbahn';
+  if (k === 'jam') return 'Durch Stau';
+  return o.jam ? 'Umfahrung' : 'Ohne Gegenrichtung';
+}
+function kindShort(k) {
+  return { contra: 'gegen Einbahn', jam: 'durch Stau', legal: (nav.options && nav.options.jam) ? 'Umfahrung' : 'ohne Gegenrichtung' }[k];
+}
+function altRoutes() {
+  if (routeKinds().length < 2) return [];
+  return routeKinds().filter(k => nav.options[k] !== nav.route).map(k => ({ kind: k, route: nav.options[k] }));
 }
 
 function drawRoute() {
@@ -1884,8 +1959,7 @@ function drawRoute() {
   const r = nav.route;
   if (!r) return;
   const route = cssVar('--route'), contra = cssVar('--contra');
-  const alt = altRoute();
-  if (alt && !nav.arrived) {
+  for (const alt of nav.arrived ? [] : altRoutes()) {
     const a = alt.route;
     L.polyline(a.shape, { pane: 'alt', color: '#0a1424', weight: 11, opacity: .5, interactive: false }).addTo(routeLayer);
     L.polyline(a.shape, { pane: 'alt', color: cssVar('--alt'), weight: 6, opacity: 1, interactive: false }).addTo(routeLayer);
@@ -1899,7 +1973,7 @@ function drawRoute() {
       for (let j = 0; j < r.shape.length; j += Math.max(1, Math.floor(r.shape.length / 120))) dmin = Math.min(dmin, haversine(a.shape[i], r.shape[j]));
       if (dmin > bd) { bd = dmin; bi = i; }
     }
-    const label = `${fmtDur(a.time)} ${alt.kind === 'legal' ? 'ohne Gegenrichtung' : 'gegen Einbahn'}`;
+    const label = `${a.traffic && a.traffic.closed ? 'gesperrt' : fmtDur(shownTime(a))} ${kindShort(alt.kind)}`;
     L.marker(a.shape[bi], { keyboard: false, zIndexOffset: 500, icon: L.divIcon({ className: '', iconSize: [0, 0], iconAnchor: [0, 0], html: `<div class="alt-label ${alt.kind}">${esc(label)}</div>` }) })
       .on('click', pick).addTo(routeLayer);
   }
@@ -1935,22 +2009,34 @@ function renderBadges() {
   b.push(`<span class="badge"><i></i>${esc(vehicleLabel())}</span>`);
   if (r && r.contra.length) b.push(`<span class="badge contra"><i></i>Gegen Einbahn ${fmtDist(r.contraLen)}</span>`);
   if (closures.length) b.push(`<span class="badge closure"><i></i>${closures.length} ${closures.length === 1 ? 'Sperrung' : 'Sperrungen'} berücksichtigt</span>`);
+  if (r && r.traffic && (r.traffic.closed || r.traffic.delay >= 60)) b.push(`<span class="badge jam"><i></i>${r.traffic.closed ? 'Sperrung auf Route' : `Stau +${fmtMin(r.traffic.delay)}`}</span>`);
+  else if (r && r.detour) b.push(`<span class="badge"><i></i>Stau umfahren</span>`);
+  else if (trafficOn() && r && r.traffic) b.push(`<span class="badge"><i></i>Verkehr frei</span>`);
   ui.routeBadges.innerHTML = b.join('');
 }
 
 function renderChoice() {
   const o = nav.options;
-  const show = !!(o && o.legal && o.contra && !nav.arrived);
+  const kinds = routeKinds();
+  const show = kinds.length >= 2 && !nav.arrived;
   ui.routeChoice.hidden = !show;
   if (!show) { ui.routeChoice.innerHTML = ''; return; }
-  const cur = nav.route === o.contra ? 'contra' : 'legal';
-  const item = (k, r, title, sub) => `<button type="button" role="radio" aria-checked="${k === cur}" data-route="${k}" class="rc ${k}${k === cur ? ' on' : ''}">
-      <span class="rc-head"><i class="rc-sw"></i>${title}</span>
-      <span class="rc-time">${fmtDur(r.time)}</span>
-      <span class="rc-sub">${sub}</span></button>`;
-  ui.routeChoice.innerHTML =
-    item('contra', o.contra, 'Gegen Einbahn', `${fmtDist(o.contra.total)}, davon ${fmtDist(o.contra.contraLen)} entgegen`) +
-    item('legal', o.legal, 'Ohne Gegenrichtung', `${fmtDist(o.legal.total)}, nur in Fahrtrichtung`);
+  const cur = currentKind();
+  const sub = k => {
+    const r = o[k], t = r.traffic;
+    if (k === 'contra') return `${fmtDist(r.total)}, ${fmtDist(r.contraLen)} entgegen`;
+    if (k === 'jam') return t && t.closed ? `${fmtDist(r.total)}, Sperrung` : `${fmtDist(r.total)}, Stau +${fmtMin(t ? t.delay : 0)}`;
+    if (t && t.delay >= 60) return `${fmtDist(r.total)}, Stau +${fmtMin(t.delay)}`;
+    return `${fmtDist(r.total)}, ${o.jam ? 'staufrei' : 'nur in Fahrtrichtung'}`;
+  };
+  ui.routeChoice.innerHTML = kinds.map(k => {
+    const r = o[k];
+    const time = r.traffic && r.traffic.closed ? 'gesperrt' : fmtDur(shownTime(r));
+    return `<button type="button" role="radio" aria-checked="${k === cur}" data-route="${k}" class="rc ${k}${k === cur ? ' on' : ''}">
+      <span class="rc-head"><i class="rc-sw"></i>${kindTitle(k)}</span>
+      <span class="rc-time">${time}</span>
+      <span class="rc-sub">${sub(k)}</span></button>`;
+  }).join('');
 }
 
 function selectRoute(kind) {
@@ -1960,12 +2046,12 @@ function selectRoute(kind) {
   if (nav.sim) stopSim();
   nav.arrived = false;
   applyRoute(o[kind], 'switch');
-  const diff = Math.abs(o.legal.time - o.contra.time);
-  setStatus(kind === 'contra'
-    ? `Route gegen Einbahnrichtung gewählt, ${fmtDur(diff)} schneller`
-    : `Route ohne Gegenrichtung gewählt, ${fmtDur(diff)} langsamer`);
-  dlog(`Umschaltung durch Nutzer: ${kind === 'contra' ? 'gegen Einbahnrichtung' : 'ohne Gegenrichtung'}`);
-  say(kind === 'contra' ? 'Route gegen Einbahnrichtung gewählt.' : 'Route ohne Einbahnstraße gewählt.', true);
+  drawTraffic();
+  const best = Math.min(...routeKinds().map(k => effTime(o[k])));
+  const diff = effTime(o[kind]) - best;
+  setStatus(`Route „${kindTitle(kind)}“ gewählt${diff >= 5 ? `, ${fmtDur(diff)} langsamer als die schnellste` : ', schnellste Variante'}`);
+  dlog(`Umschaltung durch Nutzer: ${kindTitle(kind)}`);
+  say({ contra: 'Route gegen Einbahnrichtung gewählt.', jam: 'Route durch den Stau gewählt.', legal: o.jam ? 'Umfahrung gewählt.' : 'Route ohne Einbahnstraße gewählt.' }[kind], true);
 }
 ui.routeChoice.addEventListener('click', e => {
   const b = e.target.closest('[data-route]');
@@ -2012,6 +2098,7 @@ function syncTopUi() {
 
 async function startNav() {
   nav.active = true;
+  startTrafficTimer();
   showNavUi();
   try {
     if ('wakeLock' in navigator) nav.wake = await navigator.wakeLock.request('screen');
@@ -2025,6 +2112,11 @@ function stopNav() {
   nav.route = null;
   nav.options = null;
   nav.arrived = false;
+  stopTrafficTimer();
+  TRAFFIC.layer.clearLayers();
+  railLayer.clearLayers();
+  $('destInfo').hidden = true;
+  $('trafficWarn').hidden = true;
   close3d();
   setBig(false);
   v3el.btn.hidden = true;
@@ -2131,6 +2223,7 @@ function navUpdate() {
     if (k === curK && e > b) remTime += mm.time * Math.max(0, Math.min(1, (e - along) / (e - b)));
     else if (k > curK) remTime += mm.time;
   }
+  if (trafficOn()) { remTime += remainingDelay(r, along); trafficBanner(r, along); }
   const eta = new Date(Date.now() + remTime * 1000);
   ui.etaClock.textContent = eta.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
   ui.remTime.textContent = Math.max(1, Math.round(remTime / 60));

@@ -6,14 +6,14 @@
  */
 'use strict';
 
-const VERSION = '2026-10-22.7';
+const VERSION = '2026-10-22.8';
 const APP_CACHE = 'app-' + VERSION;
 const LIB_CACHE = 'lib-v1';
 const TILE_CACHE = 'tiles-v1';
 const TILE_MAX = 3000;
 
 const APP_FILES = [
-  './', './index.html', './style.css', './app.js', './manifest.webmanifest',
+  './', './index.html', './style.css', './app.js', './verkehr.js', './kilometer.js', './manifest.webmanifest',
   './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png'
 ];
 const LIB_HOSTS = ['cdnjs.cloudflare.com', 'unpkg.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
