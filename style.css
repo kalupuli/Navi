@@ -398,13 +398,28 @@ body.has-route .toast { bottom: calc(var(--sheet-h, 220px) + 14px); }
 .v3-title b { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .v3-title span { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .v3-body { position: relative; flex: 1; min-height: 0; }
-/* höhere Spezifität, da maplibre-gl.css .maplibregl-map auf position: relative setzt */
-.v3-body .v3-map { position: absolute; inset: 0; width: 100%; height: 100%; background: var(--panel-2); }
+/* höhere Spezifität, da CesiumWidget.css den Container auf position: relative setzt */
+.v3-body .v3-map { position: absolute; inset: 0; width: 100%; height: 100%; background: var(--panel-2); overflow: hidden; }
+.v3-map .cesium-widget, .v3-map .cesium-widget canvas { width: 100%; height: 100%; display: block; }
 .v3-msg {
-  position: absolute; left: 12px; right: 12px; top: 50%; transform: translateY(-50%);
-  text-align: center; font-weight: 600; color: var(--muted); pointer-events: none;
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 3; max-width: calc(100% - 24px);
+  padding: 8px 12px; border-radius: 10px; background: rgba(10, 15, 20, .8); color: #fff;
+  text-align: center; font-weight: 600; font-size: 13px; line-height: 1.35; pointer-events: none;
 }
-.view3d .maplibregl-ctrl-attrib { font-size: 10px; }
+/* Quellenangaben oben links, klein und halbtransparent */
+.v3-credits {
+  position: absolute; left: 0; top: 0; right: 0; z-index: 2; padding: 2px 6px;
+  font-size: 9px; line-height: 1.3; color: rgba(255, 255, 255, .85); background: rgba(10, 15, 20, .45);
+  max-height: 26px; overflow: hidden; pointer-events: auto;
+}
+.v3-credits:empty { display: none; }
+.v3-credits img { max-height: 14px; vertical-align: middle; }
+.v3-credits a { color: inherit; }
+.v3-credits .cesium-credit-expand-link { text-decoration: underline; margin-left: 6px; }
+/* CesiumWidget.css positioniert die Quellenangaben absolut am unteren Rand, hier im Streifen oben */
+.v3-credits .cesium-widget-credits { position: static; display: block; padding: 0; font-size: inherit; color: inherit; text-shadow: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Hinweis auf Cesium ion entfällt, da ion nicht genutzt wird */
+.v3-credits a[href="https://cesium.com/"] { display: none; }
 
 /* ================================================================ iPhone */
 
@@ -491,7 +506,8 @@ body.fabs-row .view3d.small {
 }
 
 /* ---------- Bedienung der 3D-Ansicht ---------- */
-.v3-body .v3-map .maplibregl-canvas-container, .v3-body .v3-map canvas { touch-action: none; }
+.v3-body .v3-map, .v3-body .v3-map canvas { touch-action: none; }
+.v3-head .icon-btn:disabled { opacity: .35; }
 .v3-pad {
   position: absolute; left: 8px; bottom: 8px; z-index: 2; display: flex; gap: 6px;
 }
@@ -512,7 +528,6 @@ body.fabs-row .view3d.small {
 }
 @media (max-height: 760px) { .view3d.small .v3-pad button { width: 38px; height: 38px; } }
 .v3-head .txt-btn { font: 700 13px/1 var(--font-ui); letter-spacing: -.02em; }
-.view3d .maplibregl-ctrl-top-right { margin-top: 2px; }
 
 /* ---------- Verkehrslage ---------- */
 .traffic-warn {
@@ -620,3 +635,9 @@ body.landscape .panel-head { padding-top: max(14px, env(safe-area-inset-top, 0px
   background: var(--oneway); color: #04140a; border-radius: 10px; padding: 8px 12px; font-weight: 700; box-shadow: var(--shadow);
 }
 .oneway-info svg { flex: none; stroke-width: 2.6; }
+
+/* Schmale iPhones: Im kleinen 3D-Fenster nur die Tasten, die Zieladresse steht im Routenblatt */
+@media (max-width: 400px) {
+  .view3d.small .v3-title { display: none; }
+  .view3d.small .v3-head { justify-content: space-between; padding-left: 4px; }
+}

@@ -19,7 +19,7 @@ const DEFAULT_SERVERS = {
   photon: 'https://photon.komoot.io',
   overpass: 'https://overpass-api.de/api/interpreter'
 };
-const APP_VERSION = '2026-10-22.13';
+const APP_VERSION = '2026-10-22.14';
 const OVERPASS_MIRRORS = ['https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 
 /* Diagnoseprotokoll der letzten Routenberechnung */
@@ -84,7 +84,8 @@ const DEFAULTS = {
   radius: 20,
   layer: 'osm',
   servers: { ...DEFAULT_SERVERS },
-  traffic: { enabled: true, key: '', threshold: 3, flow: true, autobahn: true, interval: 2 }
+  traffic: { enabled: true, key: '', threshold: 3, flow: true, autobahn: true, interval: 2 },
+  view3d: { air: true, google: '' }
 };
 
 /* ================================================================ Speicher */
@@ -2581,41 +2582,54 @@ map.on('contextmenu', e => {
 });
 
 /* ================================================================ 3D-Ansicht des Ziels
-   MapLibre GL mit Gebäudehöhen aus OpenStreetMap (OpenFreeMap), Geländehöhen (Terrarium)
-   und optionalem Luftbild. Die Bibliothek wird erst beim ersten Öffnen geladen. */
+   CesiumJS mit dem amtlichen 3D-Datensatz basemap.de 3D des BKG: LoD2-Gebäude mit Dachform
+   und Gebäudehöhe aus dem Liegenschaftskataster sowie Gelände aus dem DGM5, bundesweit.
+   Optional fotorealistische Google-3D-Kacheln mit eigenem Schlüssel.
+   Die Bibliothek wird erst beim ersten Öffnen geladen. */
 
-const ML_VER = '4.7.1';
-const ML_JS = `https://unpkg.com/maplibre-gl@${ML_VER}/dist/maplibre-gl.js`;
-const ML_CSS = `https://unpkg.com/maplibre-gl@${ML_VER}/dist/maplibre-gl.css`;
-const STYLE_3D = 'https://tiles.openfreemap.org/styles/liberty';
+const CS_VER = '1.145.0';
+const CS_BASE = `https://cdn.jsdelivr.net/npm/cesium@${CS_VER}/Build/Cesium/`;
+const BM3D_BLD = 'https://sgx.geodatenzentrum.de/gdz_basemapde_3d_gebaeude/lod2_4326_dgm5.json';
+/* Gebäude auf Höhe Null, falls das Gelände nicht geladen werden kann */
+const BM3D_BLD_FLAT = 'https://sgx.geodatenzentrum.de/gdz_basemapde_3d_gebaeude/lod2_4326_null.json';
+const BM3D_DGM = 'https://sgx.geodatenzentrum.de/gdz_basemapde_3d_gelaende/dgm5_4326_mesh';
 const AERIAL_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
-const TERRAIN_TILES = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+const MAP_TILES_3D = 'https://sgx.geodatenzentrum.de/wmts_basemapde/tile/1.0.0/de_basemapde_web_raster_farbe/default/GLOBAL_WEBMERCATOR/{z}/{y}/{x}.png';
+const V3_PITCH = -30, V3_RANGE = 280, V3_HL = '#22d3ee';
 
-const v3 = { map: null, ready: false, marker: null, big: false, spin: false, raf: 0, air: false, bldLayer: null, hlKey: '', hlTries: 0 };
+const v3 = {
+  w: null, ready: false, big: false, spin: false, raf: 0, tween: 0,
+  air: settings.view3d.air !== false, google: false,
+  cam: { h: 0, p: V3_PITCH, r: V3_RANGE }, center: null, groundH: 0,
+  bld: null, gTiles: null, layers: {}, ents: [], pin: null,
+  hlKey: '', hlTries: 0, hlFeature: null, heightKey: '', flat: false
+};
 const v3el = {
-  box: $('view3d'), map: $('v3Map'), addr: $('v3Addr'), msg: $('v3Msg'), btn: $('view3dBtn'),
-  air: $('v3Air'), spin: $('v3Spin'), center: $('v3Center'), size: $('v3Size'), close: $('v3Close')
+  box: $('view3d'), map: $('v3Map'), addr: $('v3Addr'), msg: $('v3Msg'), btn: $('view3dBtn'), credits: $('v3Credits'),
+  air: $('v3Air'), src: $('v3Src'), spin: $('v3Spin'), center: $('v3Center'), size: $('v3Size'), close: $('v3Close')
 };
 const destKey = () => dest ? `${dest.lat.toFixed(6)},${dest.lon.toFixed(6)}` : '';
 
-let mlPromise = null;
-function loadMapLibre() {
-  if (window.maplibregl) return Promise.resolve();
-  if (mlPromise) return mlPromise;
-  mlPromise = new Promise((resolve, reject) => {
+let csPromise = null;
+function loadCesium() {
+  if (window.Cesium) return Promise.resolve();
+  if (csPromise) return csPromise;
+  window.CESIUM_BASE_URL = CS_BASE;
+  csPromise = new Promise((resolve, reject) => {
     const css = document.createElement('link');
-    css.rel = 'stylesheet'; css.href = ML_CSS;
+    css.rel = 'stylesheet'; css.href = CS_BASE + 'Widgets/CesiumWidget/CesiumWidget.css';
     document.head.appendChild(css);
     const js = document.createElement('script');
-    js.src = ML_JS; js.async = true;
+    js.src = CS_BASE + 'Cesium.js'; js.async = true;
     js.onload = () => resolve();
-    js.onerror = () => { mlPromise = null; js.remove(); reject(new Error('3D-Bibliothek nicht erreichbar')); };
+    js.onerror = () => { csPromise = null; js.remove(); reject(new Error('3D-Bibliothek nicht erreichbar')); };
     document.head.appendChild(js);
   });
-  return mlPromise;
+  return csPromise;
 }
 
 function v3msg(text) { v3el.msg.textContent = text || ''; v3el.msg.hidden = !text; }
+const v3render = () => { if (v3.w) v3.w.scene.requestRender(); };
 
 /* Blickrichtung: Richtung der letzten 60 m der Route, also so, wie das Ziel angefahren wird */
 function approachBearing() {
@@ -2627,127 +2641,232 @@ function approachBearing() {
   return planarBearing(r.xy[k], r.xy[n]);
 }
 
-function routeGeo3d() {
-  const r = nav.route;
-  const feats = [];
-  if (r) {
-    const ll = p => [p[1], p[0]];
-    feats.push({ type: 'Feature', properties: { contra: false }, geometry: { type: 'LineString', coordinates: r.shape.map(ll) } });
-    for (const c of r.oneways || []) feats.push({ type: 'Feature', properties: { contra: false, oneway: true }, geometry: { type: 'LineString', coordinates: r.shape.slice(c.i0, c.i1 + 2).map(ll) } });
-    for (const c of r.contra) feats.push({ type: 'Feature', properties: { contra: true }, geometry: { type: 'LineString', coordinates: r.shape.slice(c.i0, c.i1 + 2).map(ll) } });
-  }
-  return { type: 'FeatureCollection', features: feats };
+/* ---------- Kamera: Das Ziel bleibt Drehpunkt in der Bildmitte ---------- */
+
+function applyCam() {
+  if (!v3.w || !v3.center) return;
+  const C = Cesium, c = v3.cam;
+  c.p = Math.max(-89.5, Math.min(-8, c.p));
+  c.r = Math.max(45, Math.min(2500, c.r));
+  c.h = ((c.h % 360) + 360) % 360;
+  v3.w.camera.lookAt(v3.center, new C.HeadingPitchRange(C.Math.toRadians(c.h), C.Math.toRadians(c.p), c.r));
+  v3render();
 }
 
-function setup3dLayers() {
-  const m = v3.map;
-  const style = m.getStyle();
-  const firstSymbol = (style.layers.find(l => l.type === 'symbol') || {}).id;
-  const vecSrc = Object.keys(style.sources).find(k => style.sources[k].type === 'vector');
-  let ext = style.layers.find(l => l.type === 'fill-extrusion');
-  if (!ext && vecSrc) {
-    m.addLayer({
-      id: 'gebaeude-3d', type: 'fill-extrusion', source: vecSrc, 'source-layer': 'building', minzoom: 14,
-      paint: {
-        'fill-extrusion-color': '#d8d1c4',
-        'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8],
-        'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
-        'fill-extrusion-opacity': 0.9
-      }
-    }, firstSymbol);
-    ext = { id: 'gebaeude-3d' };
-  }
-  v3.bldLayer = ext ? ext.id : null;
-  const firstBuilding = (style.layers.find(l => l['source-layer'] === 'building') || ext || {}).id;
+/* Weicher Übergang für Tasten und Zentrieren */
+function animCam(to, ms = 380) {
+  cancelAnimationFrame(v3.tween);
+  const from = { ...v3.cam };
+  let dh = (to.h ?? from.h) - from.h;
+  if (dh > 180) dh -= 360; else if (dh < -180) dh += 360;
+  const t0 = performance.now();
+  const step = now => {
+    const t = Math.min(1, (now - t0) / ms), e = t < .5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+    v3.cam.h = from.h + dh * e;
+    v3.cam.p = from.p + ((to.p ?? from.p) - from.p) * e;
+    v3.cam.r = from.r + ((to.r ?? from.r) - from.r) * e;
+    applyCam();
+    if (t < 1) v3.tween = requestAnimationFrame(step);
+  };
+  v3.tween = requestAnimationFrame(step);
+}
 
-  m.addSource('luftbild', { type: 'raster', tiles: [AERIAL_TILES], tileSize: 256, maxzoom: 19, attribution: 'Luftbild © Esri, Maxar, Earthstar Geographics' });
-  m.addLayer({ id: 'luftbild', type: 'raster', source: 'luftbild', layout: { visibility: 'none' } }, firstBuilding || firstSymbol);
-
+/* Drehpunkt auf Geländehöhe am Ziel, etwas angehoben, damit das Gebäude mittig steht */
+async function setCenter() {
+  const C = Cesium;
+  const key = destKey();
+  if (v3.flat) v3.groundH = 0;
+  v3.center = C.Cartesian3.fromDegrees(dest.lon, dest.lat, v3.groundH + 8);
+  if (v3.google && v3.gTiles) { googleCenter(); return; }
+  if (v3.heightKey === key || v3.flat) return;
   try {
-    m.addSource('gelaende', { type: 'raster-dem', tiles: [TERRAIN_TILES], tileSize: 256, maxzoom: 14, encoding: 'terrarium', attribution: 'Höhen: Mapzen Terrain Tiles' });
-    m.setTerrain({ source: 'gelaende', exaggeration: 1 });
-  } catch (e) { console.warn('Gelände nicht verfügbar', e); }
-
-  m.addSource('route3d', { type: 'geojson', data: routeGeo3d() });
-  m.addLayer({ id: 'route3d-rand', type: 'line', source: 'route3d', filter: ['!', ['get', 'contra']],
-    layout: { 'line-join': 'round', 'line-cap': 'round' }, paint: { 'line-color': '#0a1424', 'line-width': 10, 'line-opacity': 0.75 } }, firstSymbol);
-  m.addLayer({ id: 'route3d', type: 'line', source: 'route3d',
-    layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': ['case', ['get', 'contra'], cssVar('--contra'), ['==', ['get', 'oneway'], true], cssVar('--oneway'), cssVar('--route')], 'line-width': 6 } }, firstSymbol);
-
-  m.addSource('ziel', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-  m.addLayer({ id: 'ziel-3d', type: 'fill-extrusion', source: 'ziel', paint: {
-    'fill-extrusion-color': '#e5383b',
-    'fill-extrusion-height': ['+', ['coalesce', ['get', 'render_height'], 8], 0.6],
-    'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
-    'fill-extrusion-opacity': 0.95
-  } });
-  applyAir();
-}
-
-function applyAir() {
-  const m = v3.map;
-  v3el.air.setAttribute('aria-pressed', v3.air ? 'true' : 'false');
-  if (!m || !v3.ready) return;
-  m.setLayoutProperty('luftbild', 'visibility', v3.air ? 'visible' : 'none');
-  if (v3.bldLayer && m.getLayer(v3.bldLayer)) {
-    try { m.setPaintProperty(v3.bldLayer, 'fill-extrusion-opacity', v3.air ? 0.45 : 0.9); } catch { /* Stilvorgabe beibehalten */ }
-  }
-}
-
-/* Zielgebäude suchen: Gebäude unter dem Zielpunkt, sonst das nächstgelegene im Umkreis */
-function highlightTarget() {
-  const m = v3.map;
-  if (!m || !v3.ready || !dest || !v3.bldLayer || v3.hlKey === destKey() || v3.hlTries > 6) return;
-  v3.hlTries++;
-  const p = m.project([dest.lon, dest.lat]);
-  let feats = m.queryRenderedFeatures(p, { layers: [v3.bldLayer] });
-  if (!feats.length) {
-    const r = 40;
-    const near = m.queryRenderedFeatures([[p.x - r, p.y - r], [p.x + r, p.y + r]], { layers: [v3.bldLayer] });
-    let best = null, bd = Infinity;
-    for (const f of near) {
-      const ring = f.geometry.type === 'Polygon' ? f.geometry.coordinates[0] : f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates[0][0] : null;
-      if (!ring || !ring.length) continue;
-      const c = ring.reduce((a, q) => [a[0] + q[0] / ring.length, a[1] + q[1] / ring.length], [0, 0]);
-      const d = haversine([dest.lat, dest.lon], [c[1], c[0]]);
-      if (d < bd) { bd = d; best = f; }
+    const tp = v3.w.terrainProvider;
+    if (tp && tp.availability && !(tp instanceof C.EllipsoidTerrainProvider)) {
+      const [pos] = await C.sampleTerrainMostDetailed(tp, [C.Cartographic.fromDegrees(dest.lon, dest.lat)]);
+      if (key !== destKey()) return;
+      if (pos && Number.isFinite(pos.height)) {
+        v3.groundH = pos.height;
+        v3.heightKey = key;
+        v3.center = C.Cartesian3.fromDegrees(dest.lon, dest.lat, v3.groundH + 8);
+        placePin();
+        applyCam();
+      }
     }
-    if (best && bd < 35) feats = [best];
-  }
-  if (!feats.length) return;
-  const f = feats[0];
-  m.getSource('ziel').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { ...f.properties }, geometry: f.geometry }] });
-  v3.hlKey = destKey();
+  } catch (e) { console.warn('Geländehöhe am Ziel', e); }
 }
 
-function focus3d(animate) {
-  const m = v3.map;
-  if (!m || !dest) return;
-  const opts = { center: [dest.lon, dest.lat], zoom: 17.4, pitch: 62, bearing: approachBearing() };
-  if (animate) m.easeTo({ ...opts, duration: 900 }); else m.jumpTo(opts);
-  if (!v3.marker) v3.marker = new maplibregl.Marker({ color: '#e5383b' });
-  v3.marker.setLngLat([dest.lon, dest.lat]).addTo(m);
-  if (v3.hlKey !== destKey()) { v3.hlTries = 0; m.getSource('ziel') && m.getSource('ziel').setData({ type: 'FeatureCollection', features: [] }); }
-  update3dRoute();
+/* Google-Kacheln haben eigene Höhen: Drehpunkt auf der Oberfläche der Kacheln am Ziel */
+async function googleCenter() {
+  const C = Cesium, key = destKey();
+  if (v3.gCenterKey === key && v3.gCenter) { v3.center = v3.gCenter; applyCam(); return; }
+  try {
+    const [c] = await v3.w.scene.sampleHeightMostDetailed([C.Cartographic.fromDegrees(dest.lon, dest.lat)], v3.ents.concat(v3.pin ? [v3.pin] : []));
+    if (key !== destKey() || !v3.google) return;
+    if (c && Number.isFinite(c.height)) {
+      v3.gCenter = C.Cartesian3.fromDegrees(dest.lon, dest.lat, c.height + 4);
+      v3.gCenterKey = key;
+      v3.center = v3.gCenter;
+      applyCam();
+    }
+  } catch (e) { console.warn('Höhe Google 3D', e); }
+}
+
+/* ---------- Darstellung ---------- */
+
+const PIN_SVG = 'data:image/svg+xml;base64,' + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="36" height="48" viewBox="0 0 36 48"><path d="M18 46C18 46 33 28 33 17A15 15 0 0 0 3 17C3 28 18 46 18 46Z" fill="#e5383b" stroke="#fff" stroke-width="3"/><circle cx="18" cy="17" r="6" fill="#fff"/></svg>');
+
+function placePin() {
+  const C = Cesium;
+  if (!v3.w || !dest) return;
+  const pos = C.Cartesian3.fromDegrees(dest.lon, dest.lat, v3.groundH);
+  if (!v3.pin) {
+    v3.pin = v3.w.entities.add({
+      position: pos,
+      billboard: {
+        image: PIN_SVG, width: 30, height: 40, verticalOrigin: C.VerticalOrigin.BOTTOM,
+        heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY
+      }
+    });
+  } else v3.pin.position = pos;
 }
 
 function update3dRoute() {
-  if (!v3.map || !v3.ready) return;
-  const src = v3.map.getSource('route3d');
-  if (src) src.setData(routeGeo3d());
+  if (!v3.w || !v3.ready) return;
+  const C = Cesium, r = nav.route;
+  for (const e of v3.ents) v3.w.entities.remove(e);
+  v3.ents = [];
+  if (r) {
+    const pos = pts => C.Cartesian3.fromDegreesArray(pts.flatMap(p => [p[1], p[0]]));
+    const add = (pts, color, width, z) => {
+      if (pts.length < 2) return;
+      v3.ents.push(v3.w.entities.add({ polyline: {
+        positions: pos(pts), width, clampToGround: true, zIndex: z,
+        classificationType: C.ClassificationType.BOTH, material: C.Color.fromCssColorString(color)
+      } }));
+    };
+    /* Nur der Teil der Route im Umkreis von 3 km um das Ziel wird gezeichnet */
+    let k0 = 0;
+    while (k0 < r.shape.length - 2 && r.total - r.cum[k0] > 3000) k0++;
+    add(r.shape.slice(k0), '#0a1424', 11, 0);
+    add(r.shape.slice(k0), cssVar('--route'), 7, 1);
+    for (const c of r.oneways || []) if (c.i1 + 1 >= k0) add(r.shape.slice(Math.max(c.i0, k0), c.i1 + 2), cssVar('--oneway'), 7, 2);
+    for (const c of r.contra) if (c.i1 + 1 >= k0) add(r.shape.slice(Math.max(c.i0, k0), c.i1 + 2), cssVar('--contra'), 7, 3);
+  }
+  v3render();
+}
+
+function imageryLayer(air) {
+  const C = Cesium;
+  if (!v3.layers[air ? 'air' : 'map']) {
+    const provider = air
+      ? new C.UrlTemplateImageryProvider({ url: AERIAL_TILES, maximumLevel: 19, credit: new C.Credit('Luftbild © Esri, Maxar, Earthstar Geographics', true) })
+      : new C.UrlTemplateImageryProvider({ url: MAP_TILES_3D, maximumLevel: 18, credit: new C.Credit('Karte © basemap.de / BKG', true) });
+    v3.layers[air ? 'air' : 'map'] = new C.ImageryLayer(provider);
+  }
+  return v3.layers[air ? 'air' : 'map'];
+}
+
+function applyAir() {
+  v3el.air.setAttribute('aria-pressed', v3.air ? 'true' : 'false');
+  if (!v3.w || !v3.ready) return;
+  const want = imageryLayer(v3.air), il = v3.w.imageryLayers;
+  for (let i = il.length - 1; i >= 0; i--) { const l = il.get(i); if (l !== want) il.remove(l, false); }
+  if (!il.contains(want)) il.add(want, 0);
+  v3render();
+}
+
+/* Fotorealistische Google-Kacheln (eigener Schlüssel in den Einstellungen) */
+async function applySource() {
+  const key = (settings.view3d.google || '').trim();
+  v3el.src.hidden = !key;
+  if (!key) v3.google = false;
+  v3el.src.setAttribute('aria-pressed', v3.google ? 'true' : 'false');
+  if (!v3.w || !v3.ready) return;
+  const C = Cesium, sc = v3.w.scene;
+  if (v3.google) {
+    if (!v3.gTiles || v3.gTiles.key !== key) {
+      if (v3.gTiles) { sc.primitives.remove(v3.gTiles.ts); v3.gTiles = null; }
+      v3msg('Google 3D wird geladen');
+      try {
+        const ts = await C.createGooglePhotorealistic3DTileset({ key }, { showCreditsOnScreen: true, maximumScreenSpaceError: 16, cacheBytes: 192 * 1024 * 1024 });
+        v3.gTiles = { ts, key };
+        sc.primitives.add(ts);
+        v3msg('');
+      } catch (e) {
+        console.warn('Google 3D', e);
+        v3.google = false;
+        v3el.src.setAttribute('aria-pressed', 'false');
+        v3msg('Google 3D nicht verfügbar. Schlüssel und Freigabe der Map Tiles API prüfen.');
+        setTimeout(() => v3msg(''), 5000);
+      }
+    }
+  }
+  const g = v3.google && !!v3.gTiles;
+  if (v3.gTiles) v3.gTiles.ts.show = g;
+  if (v3.bld) v3.bld.show = !g;
+  sc.globe.show = !g;
+  v3el.air.disabled = g;
+  if (g) v3.w.imageryLayers.removeAll(false); else applyAir();
+  if (v3.bkgCredit) { if (g) v3.w.creditDisplay.removeStaticCredit(v3.bkgCredit); else v3.w.creditDisplay.addStaticCredit(v3.bkgCredit); }
+  if (dest) setCenter();
+  v3render();
+}
+
+/* Zielgebäude: senkrechter Strahl von oben am Zielpunkt, sonst das nächste Gebäude im Umkreis von 25 m */
+function highlightTarget() {
+  const C = Cesium;
+  if (!v3.w || !v3.bld || !v3.bld.show || !dest || v3.hlKey === destKey() || v3.hlTries > 8) return;
+  const sc = v3.w.scene;
+  if (typeof sc.pickFromRay !== 'function') return;
+  v3.hlTries++;
+  const hitAt = (dx, dy) => {
+    const lat = dest.lat + dy / 111320, lon = dest.lon + dx / (111320 * Math.cos(toRad(dest.lat)));
+    const top = C.Cartesian3.fromDegrees(lon, lat, v3.groundH + 400);
+    const bottom = C.Cartesian3.fromDegrees(lon, lat, v3.groundH - 50);
+    const dir = C.Cartesian3.normalize(C.Cartesian3.subtract(bottom, top, new C.Cartesian3()), new C.Cartesian3());
+    try {
+      const res = sc.pickFromRay(new C.Ray(top, dir), v3.ents.concat(v3.pin ? [v3.pin] : []));
+      return res && res.object instanceof C.Cesium3DTileFeature ? res.object : null;
+    } catch { return null; }
+  };
+  let f = hitAt(0, 0);
+  for (const d of [5, 10, 15, 20, 25]) {
+    if (f) break;
+    for (let a = 0; a < 360 && !f; a += 45) f = hitAt(d * Math.sin(toRad(a)), d * Math.cos(toRad(a)));
+  }
+  if (!f) return;
+  if (v3.hlFeature) try { v3.hlFeature.color = C.Color.WHITE; } catch { /* Kachel entladen */ }
+  f.color = C.Color.fromCssColorString(V3_HL);
+  v3.hlFeature = f;
+  v3.hlKey = destKey();
+  v3render();
+}
+
+function focus3d(animate) {
+  if (!v3.w || !dest) return;
+  if (v3.hlKey !== destKey()) {
+    v3.hlTries = 0;
+    if (v3.hlFeature) { try { v3.hlFeature.color = Cesium.Color.WHITE; } catch { /* Kachel entladen */ } v3.hlFeature = null; }
+  }
+  const to = { h: approachBearing(), p: V3_PITCH, r: V3_RANGE };
+  setCenter();
+  placePin();
+  if (animate) animCam(to, 700); else { Object.assign(v3.cam, to); applyCam(); }
+  syncTilt(V3_PITCH);
+  update3dRoute();
 }
 
 function setSpin(on) {
   v3.spin = on;
   v3el.spin.setAttribute('aria-pressed', on ? 'true' : 'false');
   cancelAnimationFrame(v3.raf);
-  if (!on || !v3.map) return;
+  if (!on || !v3.w) return;
   let last = performance.now();
   const step = now => {
-    if (!v3.spin || !v3.map) return;
-    v3.map.setBearing((v3.map.getBearing() + (now - last) * 0.012) % 360);
+    if (!v3.spin || !v3.w) return;
+    v3.cam.h += (now - last) * 0.012;
     last = now;
+    applyCam();
     v3.raf = requestAnimationFrame(step);
   };
   v3.raf = requestAnimationFrame(step);
@@ -2758,113 +2877,171 @@ async function open3d() {
   v3el.box.hidden = false;
   v3el.btn.setAttribute('aria-pressed', 'true');
   v3el.addr.textContent = dest.label || 'Ziel';
+  applySource();
   /* Zu wenig Platz für das kleine Fenster (z. B. iPhone SE hochkant): direkt im Vollbild öffnen */
   if (!v3.big && !document.body.classList.contains('landscape')) {
     const free = innerHeight - ui.routeSheet.getBoundingClientRect().height - ui.navBanner.getBoundingClientRect().bottom - (document.body.classList.contains('fabs-row') ? 96 : 28);
     if (free < 170) setBig(true);
   }
-  if (v3.map) { v3.map.resize(); focus3d(true); return; }
+  if (v3.w) { v3.w.useDefaultRenderLoop = true; v3.w.resize(); focus3d(true); return; }
   v3msg('3D-Ansicht wird geladen');
-  try { await loadMapLibre(); } catch (e) { v3msg('3D-Bibliothek nicht erreichbar. Netzverbindung prüfen.'); return; }
+  try { await loadCesium(); } catch (e) { v3msg('3D-Bibliothek nicht erreichbar. Netzverbindung prüfen.'); return; }
   if (v3el.box.hidden) return;
+  const C = Cesium;
+  const dpr = window.devicePixelRatio || 1;
+  const terrain = new C.Terrain(C.CesiumTerrainProvider.fromUrl(BM3D_DGM));
+  terrain.errorEvent.addEventListener(err => terrainFallback(err));
+  terrain.readyEvent.addEventListener(tp => tp.errorEvent.addEventListener(err => {
+    /* Fehlende Kacheln der obersten Ebenen: Gelände insgesamt nicht nutzbar */
+    if (err && err.level != null && err.level <= 3) terrainFallback(err.message);
+  }));
   try {
-    v3.map = new maplibregl.Map({
-      container: v3el.map, style: STYLE_3D,
-      center: [dest.lon, dest.lat], zoom: 17.4, pitch: 62, bearing: approachBearing(),
-      minZoom: 14, maxZoom: 19.8, maxPitch: 80,
-      attributionControl: false, dragRotate: false, dragPan: false, touchPitch: false,
-      doubleClickZoom: false, keyboard: false, boxZoom: false, pitchWithRotate: false
+    v3.w = new C.CesiumWidget(v3el.map, {
+      baseLayer: false, skyBox: false, scene3DOnly: true, requestRenderMode: true,
+      maximumRenderTimeChange: Infinity, showRenderLoopErrors: false,
+      creditContainer: v3el.credits, useBrowserRecommendedResolution: false,
+      terrain
     });
   } catch (e) {
-    v3.map = null;
+    v3.w = null;
+    console.warn('3D', e);
     v3msg('3D-Darstellung wird von diesem Gerät nicht unterstützt (WebGL).');
     return;
   }
-  v3.map.addControl(new maplibregl.AttributionControl({ compact: true }), 'top-right');
+  const w = v3.w, sc = w.scene;
+  w.resolutionScale = Math.min(dpr, 2) / dpr;
+  sc.screenSpaceCameraController.enableInputs = false;
+  sc.globe.depthTestAgainstTerrain = true;
+  sc.globe.baseColor = C.Color.fromCssColorString('#2b3440');
+  sc.globe.tileCacheSize = 60;
+  sc.fog.enabled = true;
+  v3.bkgCredit = new C.Credit('3D-Gebäude und Gelände © basemap.de / BKG', true);
+  w.creditDisplay.addStaticCredit(v3.bkgCredit);
+  sc.terrainProviderChanged.addEventListener(() => { v3.heightKey = ''; if (dest) setCenter(); });
+  sc.renderError.addEventListener((s, err) => { console.warn('3D Renderfehler', err); v3msg('3D-Darstellung abgebrochen. Fenster schließen und erneut öffnen.'); });
+  v3.ready = true;
+  applyAir();
   setup3dGestures();
-  v3.map.on('load', () => {
-    v3.ready = true;
-    v3msg('');
+  focus3d(false);
+  await loadBuildings();
+  applySource();
+  v3render();
+}
 
-    try { setup3dLayers(); } catch (e) { console.warn('3D-Ebenen', e); }
-    focus3d(false);
-    /* Quellenangabe nach dem Laden aller Quellen einklappen (Tipp auf „i“ zeigt sie wieder) */
-    v3.map.once('idle', collapseAttrib);
-  });
-  v3.map.on('idle', highlightTarget);
-  v3.map.on('error', e => {
-    if (!v3.ready) v3msg('Kartendaten für die 3D-Ansicht nicht erreichbar.');
-    console.warn('3D', e && e.error ? e.error.message : e);
-  });
-  v3.map.on('zoomstart', e => { if (e.originalEvent && v3.spin) setSpin(false); });
+async function loadBuildings() {
+  const C = Cesium, sc = v3.w.scene, url = v3.flat ? BM3D_BLD_FLAT : BM3D_BLD;
+  if (v3.bld && v3.bld.srcUrl === url) return;
+  v3.msg3d = !v3el.msg.hidden && /geladen/.test(v3el.msg.textContent);
+  try {
+    const ts = await C.Cesium3DTileset.fromUrl(url, { maximumScreenSpaceError: 16, cacheBytes: 192 * 1024 * 1024 });
+    if ((v3.flat ? BM3D_BLD_FLAT : BM3D_BLD) !== url) { ts.destroy(); return; }
+    if (v3.bld) sc.primitives.remove(v3.bld);
+    ts.srcUrl = url;
+    ts.colorBlendMode = C.Cesium3DTileColorBlendMode.MIX;
+    ts.colorBlendAmount = 0.85;
+    ts.allTilesLoaded.addEventListener(() => highlightTarget());
+    sc.primitives.add(ts);
+    v3.bld = ts;
+    v3.hlKey = ''; v3.hlTries = 0; v3.hlFeature = null;
+    if (v3.msg3d) v3msg('');
+    applySource();
+  } catch (e) {
+    console.warn('basemap.de 3D', e);
+    v3msg('3D-Gebäude (basemap.de) nicht erreichbar. Gelände und Luftbild werden angezeigt.');
+    setTimeout(() => v3msg(''), 6000);
+  }
+}
+
+/* Gelände nicht erreichbar: flache Erde und Gebäude auf Höhe Null, damit beides zusammenpasst */
+function terrainFallback(reason) {
+  if (v3.flat || !v3.w) return;
+  console.warn('basemap.de Gelände nicht nutzbar', reason);
+  v3.flat = true;
+  v3.w.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+  v3.groundH = 0;
+  v3msg('Gelände (basemap.de) nicht erreichbar. Darstellung ohne Höhen.');
+  setTimeout(() => v3msg(''), 6000);
+  if (dest) { setCenter(); placePin(); applyCam(); }
+  if (v3.bld) loadBuildings();
 }
 
 /* Bedienung der 3D-Ansicht: Das Ziel bleibt in der Bildmitte.
    Ein Finger (oder Maus) waagrecht: um das Ziel drehen. Senkrecht: Ansicht neigen.
    Zwei Finger (oder Mausrad): zoomen, immer auf die Bildmitte bezogen. */
 function setup3dGestures() {
-  const m = v3.map;
-  m.touchZoomRotate.enable({ around: 'center' });
-  m.touchZoomRotate.disableRotation();
-  m.scrollZoom.enable({ around: 'center' });
-  const el = m.getCanvasContainer();
+  const el = v3el.map;
   el.style.touchAction = 'none';
   const pts = new Map();
-  let last = null;
+  let last = null, pinch = 0;
+  const dist = () => { const [a, b] = [...pts.values()]; return Math.hypot(a[0] - b[0], a[1] - b[1]); };
   el.addEventListener('pointerdown', e => {
     pts.set(e.pointerId, [e.clientX, e.clientY]);
-    if (pts.size === 1) {
-      last = [e.clientX, e.clientY];
-      try { el.setPointerCapture(e.pointerId); } catch { /* nicht unterstützt */ }
-      if (v3.spin) setSpin(false);
-    } else last = null;
+    try { el.setPointerCapture(e.pointerId); } catch { /* nicht unterstützt */ }
+    cancelAnimationFrame(v3.tween);
+    if (v3.spin) setSpin(false);
+    if (pts.size === 1) last = [e.clientX, e.clientY];
+    else { last = null; pinch = pts.size === 2 ? dist() : 0; }
   });
   el.addEventListener('pointermove', e => {
     if (!pts.has(e.pointerId)) return;
     pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pts.size === 2 && pinch) {
+      const d = dist();
+      if (d > 10) { v3.cam.r *= pinch / d; pinch = d; applyCam(); }
+      return;
+    }
     if (pts.size !== 1 || !last) return;
     const dx = e.clientX - last[0], dy = e.clientY - last[1];
     last = [e.clientX, e.clientY];
-    m.jumpTo({
-      bearing: m.getBearing() - dx * 0.4,
-      pitch: Math.max(0, Math.min(80, m.getPitch() - dy * 0.35))
-    });
+    v3.cam.h -= dx * 0.4;
+    v3.cam.p -= dy * 0.35;
+    applyCam();
+    syncTilt(v3.cam.p);
   });
   const end = e => {
     pts.delete(e.pointerId);
     /* Nach einem Zweifinger-Zoom nicht sofort weiterdrehen */
     last = null;
+    pinch = pts.size === 2 ? dist() : 0;
   };
   for (const t of ['pointerup', 'pointercancel']) el.addEventListener(t, end);
-}
-
-function collapseAttrib() {
-  v3el.map.querySelectorAll('.maplibregl-ctrl-attrib').forEach(a => { a.classList.remove('maplibregl-compact-show'); a.removeAttribute('open'); });
+  el.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (v3.spin) setSpin(false);
+    v3.cam.r *= Math.exp(e.deltaY * 0.0015);
+    applyCam();
+  }, { passive: false });
 }
 
 function v3pad(action) {
-  const m = v3.map;
-  if (!m) return;
+  if (!v3.w) return;
   setSpin(false);
-  const b = m.getBearing(), p = m.getPitch(), z = m.getZoom();
-  if (action === 'rotl') m.easeTo({ bearing: b + 45, duration: 350 });
-  else if (action === 'rotr') m.easeTo({ bearing: b - 45, duration: 350 });
-  else if (action === 'tilt') m.easeTo({ pitch: p > 30 ? 0 : 62, duration: 450 });
-  else if (action === 'in') m.easeTo({ zoom: Math.min(19.8, z + 0.8), duration: 300 });
-  else if (action === 'out') m.easeTo({ zoom: Math.max(14, z - 0.8), duration: 300 });
-  if (action === 'tilt') syncTilt(p > 30 ? 0 : 62);
+  const c = v3.cam;
+  if (action === 'rotl') animCam({ h: c.h + 45 });
+  else if (action === 'rotr') animCam({ h: c.h - 45 });
+  else if (action === 'tilt') { const p = c.p < -70 ? V3_PITCH : -89.5; animCam({ p }, 450); syncTilt(p); }
+  else if (action === 'in') animCam({ r: c.r / 1.6 }, 300);
+  else if (action === 'out') animCam({ r: c.r * 1.6 }, 300);
 }
+/* Tastenbeschriftung: zeigt die Ansicht, in welche gewechselt wird */
 function syncTilt(pitch) {
   const b = document.querySelector('[data-v3="tilt"]');
-  if (b) b.textContent = pitch > 30 ? '2D' : '3D';
+  if (b) b.textContent = pitch < -70 ? '3D' : '2D';
 }
-
-
 
 function close3d() {
   setSpin(false);
+  cancelAnimationFrame(v3.tween);
   v3el.box.hidden = true;
   v3el.btn.setAttribute('aria-pressed', 'false');
+  /* Kein Rendern im Hintergrund, schont den Akku */
+  if (v3.w) v3.w.useDefaultRenderLoop = false;
+}
+
+function resize3d() {
+  if (!v3.w || v3el.box.hidden) return;
+  v3.w.resize();
+  v3render();
 }
 
 function setBig(on) {
@@ -2876,20 +3053,24 @@ function setBig(on) {
   v3el.size.innerHTML = on
     ? '<svg viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M10 14l-7 7"/></svg>'
     : '<svg viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/></svg>';
-  if (v3.map) requestAnimationFrame(() => v3.map.resize());
+  requestAnimationFrame(resize3d);
 }
 
 v3el.btn.addEventListener('click', () => { v3el.box.hidden ? open3d() : close3d(); });
 v3el.close.addEventListener('click', close3d);
 v3el.size.addEventListener('click', () => setBig(!v3.big));
-v3el.air.addEventListener('click', () => { v3.air = !v3.air; applyAir(); if (v3.map) v3.map.once('idle', collapseAttrib); });
+v3el.air.addEventListener('click', () => { v3.air = !v3.air; settings.view3d.air = v3.air; save('settings', settings); applyAir(); });
+v3el.src.addEventListener('click', () => { v3.google = !v3.google; applySource(); });
 v3el.spin.addEventListener('click', () => setSpin(!v3.spin));
-v3el.center.addEventListener('click', () => { setSpin(false); focus3d(true); syncTilt(62); });
+v3el.center.addEventListener('click', () => { setSpin(false); focus3d(true); });
 document.querySelector('.v3-pad').addEventListener('click', e => {
   const b = e.target.closest('[data-v3]');
   if (b) v3pad(b.dataset.v3);
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && v3.big) setBig(false); });
+$('optGoogle3d').value = settings.view3d.google || '';
+$('optGoogle3d').addEventListener('change', e => { settings.view3d.google = e.target.value.trim(); save('settings', settings); applySource(); });
+applySource();
 
 /* ================================================================ Diagnose */
 
@@ -3119,7 +3300,7 @@ function applyOrientation() {
   sideW = land ? Math.round(Math.min(360, Math.max(280, innerWidth * 0.38))) : 0;
   if (land) document.documentElement.style.setProperty('--side-w', `${sideW}px`);
   map.invalidateSize();
-  if (v3.map && !v3el.box.hidden) v3.map.resize();
+  resize3d();
   layoutFabs(ui.routeSheet.hidden ? 0 : ui.routeSheet.getBoundingClientRect().height, ui.navBanner.hidden ? 0 : ui.navBanner.getBoundingClientRect().bottom);
   const p = trackingPos();
   if (nav.active && nav.follow && p) followCamera(p);

@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const VERSION = '2026-10-22.13';
+const VERSION = '2026-10-22.14';
 const APP_CACHE = 'app-' + VERSION;
 const LIB_CACHE = 'lib-v1';
 const TILE_CACHE = 'tiles-v1';
@@ -16,8 +16,8 @@ const APP_FILES = [
   './', './index.html', './style.css', './app.js', './verkehr.js', './kilometer.js', './manifest.webmanifest',
   './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png'
 ];
-const LIB_HOSTS = ['cdnjs.cloudflare.com', 'unpkg.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
-const TILE_HOSTS = ['tile.openstreetmap.org', 'sgx.geodatenzentrum.de', 'tiles.openfreemap.org', 'server.arcgisonline.com', 's3.amazonaws.com'];
+const LIB_HOSTS = ['cdnjs.cloudflare.com', 'unpkg.com', 'cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'];
+const TILE_HOSTS = ['tile.openstreetmap.org', 'sgx.geodatenzentrum.de', 'server.arcgisonline.com'];
 
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
@@ -92,9 +92,8 @@ self.addEventListener('fetch', event => {
   const url = new URL(req.url);
   if (url.origin === self.location.origin) { event.respondWith(networkFirst(req)); return; }
   if (LIB_HOSTS.includes(url.hostname)) { event.respondWith(cacheFirst(req)); return; }
-  const isTile = TILE_HOSTS.includes(url.hostname) &&
-    (url.hostname !== 's3.amazonaws.com' || url.pathname.startsWith('/elevation-tiles-prod/')) &&
-    !url.pathname.startsWith('/styles/');
+  /* Kartenkacheln. Die 3D-Daten von basemap.de sind zu umfangreich für den Zwischenspeicher und gehen direkt über das Netz. */
+  const isTile = TILE_HOSTS.includes(url.hostname) && !url.pathname.includes('basemapde_3d');
   if (isTile) { event.respondWith(staleWhileRevalidate(req, event)); return; }
   /* Alles Übrige (Routing, Suche, Overpass, Kartenstil) direkt über das Netz */
 });
